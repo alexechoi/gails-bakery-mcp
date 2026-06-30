@@ -40,8 +40,26 @@ func main() {
 	})
 
 	server.AddTool(mcp.Tool{
+		Name:        "list_products",
+		Description: "List menu products (bundles) with names and prices, sorted cheapest first. Use this to browse items or find the cheapest/priciest — get_menu only returns category names, not products. Optionally scope to one category by name substring (e.g. \"pastries\") or UUID. Prices are the takeaway 'from' price in GBP. No authentication required.",
+		InputSchema: objSchema(map[string]any{
+			"category": strSchema("Optional category name substring (e.g. 'hot drinks') or UUID. Omit to list the whole menu."),
+			"store":    strSchema("Store UUID. Defaults to the standard store."),
+			"menu":     strSchema("Menu UUID. Defaults to the standard menu."),
+			"limit":    intSchema("Max products to return (after sorting cheapest first). 0 = all."),
+		}),
+		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var in app.ListProductsInput
+			if err := decode(raw, &in); err != nil {
+				return nil, err
+			}
+			return service.ListProducts(ctx, in)
+		},
+	})
+
+	server.AddTool(mcp.Tool{
 		Name:        "get_menu",
-		Description: "Get the product menu for a Gail's store. No authentication required. Defaults to the standard Click & Collect menu/store if not specified.",
+		Description: "Get the menu structure for a Gail's store: this returns CATEGORY NAMES ONLY (e.g. PASTRIES, LUNCH) plus opening hours — NOT products or prices. To list items with prices use `list_products`; for one item's full detail use `get_product`. No authentication required. Defaults to the standard Click & Collect menu/store.",
 		InputSchema: objSchema(map[string]any{
 			"store":  strSchema("Store UUID. Defaults to the standard store."),
 			"menu":   strSchema("Menu UUID. Defaults to the standard menu."),
@@ -74,7 +92,7 @@ func main() {
 
 	server.AddTool(mcp.Tool{
 		Name:        "get_product",
-		Description: "Get full detail for a product/bundle (including modifiers and options) by its bundle UUID. No authentication required.",
+		Description: "Get full detail for one product/bundle (modifiers, options, nutrition, allergens) by its bundle UUID — get the UUID from `list_products`. Note: these are CUSTOMISED bundles, so the top-level price is 0; the real takeaway price lives at items[].customizations[].variations[].price (list_products extracts it for you). No authentication required.",
 		InputSchema: objSchema(map[string]any{
 			"bundle_id": strSchema("The bundle/product UUID to fetch."),
 			"store":     strSchema("Store UUID. Defaults to the standard store."),
