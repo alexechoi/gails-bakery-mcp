@@ -127,6 +127,56 @@ func (s *Service) GetMenu(ctx context.Context, in GetMenuInput) (any, error) {
 	return s.client.GetJSON(ctx, "/catalog/v2/menu", nil, catalogHeaders(in.Store, in.Menu, in.Locale))
 }
 
+type StoreHoursInput struct {
+	Store string `json:"store"`
+	Menu  string `json:"menu"`
+}
+
+// GetStoreHours returns a store's opening hours. The store finder does not
+// populate per-store hours (its `hours` field is null); the hours live on the
+// menu endpoint as currentDayWorkHours (today) and availableHours (all 7 days),
+// keyed by the store header. openNow is computed against Europe/London time.
+// No authentication required.
+func (s *Service) GetStoreHours(ctx context.Context, in StoreHoursInput) (any, error) {
+	raw, err := s.client.GetJSON(ctx, "/catalog/v2/menu", nil, catalogHeaders(in.Store, in.Menu, ""))
+	if err != nil {
+		return nil, err
+	}
+	menus, ok := raw.([]any)
+	if !ok || len(menus) == 0 {
+		return nil, fmt.Errorf("no menu/hours found for this store")
+	}
+	menu, _ := menus[0].(map[string]any)
+	today, _ := menu["currentDayWorkHours"].(map[string]any)
+	weekly := menu["availableHours"]
+
+	openNow := false
+	if today != nil {
+		from, _ := today["from"].(string)
+		to, _ := today["to"].(string)
+		loc, err := time.LoadLocation("Europe/London")
+		if err != nil {
+			loc = time.UTC
+		}
+		hm := time.Now().In(loc).Format("15:04")
+		// HH:MM strings compare lexicographically in chronological order.
+		if from != "" && to != "" && hm >= from && hm < to {
+			openNow = true
+		}
+	}
+
+	store := in.Store
+	if store == "" {
+		store = gails.DefaultStoreUUID
+	}
+	return map[string]any{
+		"store":       store,
+		"openNow":     openNow,
+		"today":       today,
+		"weeklyHours": weekly,
+	}, nil
+}
+
 type GetProductInput struct {
 	BundleID string `json:"bundle_id"`
 	Store    string `json:"store"`
