@@ -21,7 +21,7 @@ func main() {
 
 	server.AddTool(mcp.Tool{
 		Name:        "find_stores",
-		Description: "Find Gail's Bakery stores near a postcode or lat/long. No authentication required.",
+		Description: "Find Gail's Bakery stores near a postcode or lat/long. No authentication required. Note: the `hours` field is always null here — for whether a store is open use `status` (active) and `appStatus.online == \"on\"` (accepting online orders), and for actual opening times call `store_hours`.",
 		InputSchema: objSchema(map[string]any{
 			"postcode": strSchema("UK postcode to search near, e.g. 'EC4V 6BJ'."),
 			"lat":      numberSchema("Latitude to search near (optional, used with long)."),
@@ -53,6 +53,22 @@ func main() {
 				return nil, err
 			}
 			return service.GetMenu(ctx, in)
+		},
+	})
+
+	server.AddTool(mcp.Tool{
+		Name:        "store_hours",
+		Description: "Get a store's opening hours: today's hours (currentDayWorkHours), all 7 weekdays (availableHours), and a computed openNow flag (Europe/London). No authentication required. The store finder does not return hours; use this instead.",
+		InputSchema: objSchema(map[string]any{
+			"store": strSchema("Store UUID (from find_stores). Defaults to the standard store."),
+			"menu":  strSchema("Menu UUID. Defaults to the standard shared menu."),
+		}),
+		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var in app.StoreHoursInput
+			if err := decode(raw, &in); err != nil {
+				return nil, err
+			}
+			return service.GetStoreHours(ctx, in)
 		},
 	})
 
