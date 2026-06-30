@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -193,6 +194,185 @@ func (s *Service) GetProduct(ctx context.Context, in GetProductInput) (any, erro
 	q.Set("provideIsInLayoutStatus", "1")
 	q.Set("forceStockStatus", "1")
 	return s.client.GetJSON(ctx, "/catalog/bundles/"+url.PathEscape(in.BundleID), q, catalogHeaders(in.Store, in.Menu, in.Locale))
+}
+
+type ListProductsInput struct {
+	Category string `json:"category"`
+	Store    string `json:"store"`
+	Menu     string `json:"menu"`
+	Limit    int    `json:"limit"`
+}
+
+type productEntry struct {
+	UUID     string   `json:"uuid"`
+	Name     string   `json:"name,omitempty"`
+	Category string   `json:"category"`
+	Price    *float64 `json:"price,omitempty"`
+}
+
+// ListProducts lists the products (bundles) in the menu with names and prices.
+// get_menu only returns category names, so this is how you enumerate items.
+// It reads the menu's categories, then fetches each category's bundles via
+// /catalog/categories/{uuid}/bundles (one call per category, concurrently),
+// extracting each bundle's effective takeaway price. Results are sorted
+// cheapest first, which answers questions like "the cheapest item". Pass
+// `category` (name substring or UUID) to scope to one category. No auth.
+func (s *Service) ListProducts(ctx context.Context, in ListProductsInput) (any, error) {
+	headers := catalogHeaders(in.Store, in.Menu, "")
+	raw, err := s.client.GetJSON(ctx, "/catalog/v2/menu", nil, headers)
+	if err != nil {
+		return nil, err
+	}
+	menus, _ := raw.([]any)
+	if len(menus) == 0 {
+		return nil, fmt.Errorf("no menu found for this store")
+	}
+	menu, _ := menus[0].(map[string]any)
+
+	filter := strings.ToLower(strings.TrimSpace(in.Category))
+	type catRef struct{ uuid, name string }
+	var selected []catRef
+	for _, c := range asSlice(menu["categories"]) {
+		cm, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		uuid, _ := cm["uuid"].(string)
+		name, _ := cm["name"].(string)
+		if uuid == "" {
+			continue
+		}
+		if filter == "" || strings.Contains(strings.ToLower(name), filter) || strings.EqualFold(uuid, filter) {
+			selected = append(selected, catRef{uuid, name})
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no matching category for %q", in.Category)
+	}
+
+	// One bundles call per category, concurrently.
+	bundlesByCat := make([][]any, len(selected))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, cr := range selected {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, cr catRef) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			q := url.Values{}
+			q.Set("forceStockStatus", "0")
+			b, err := s.client.GetJSON(ctx, "/catalog/categories/"+url.PathEscape(cr.uuid)+"/bundles", q, headers)
+			if err != nil {
+				return
+			}
+			if bm, ok := b.(map[string]any); ok {
+				bundlesByCat[i] = asSlice(bm["bundles"])
+			}
+		}(i, cr)
+	}
+	wg.Wait()
+
+	seen := map[string]bool{}
+	var entries []*productEntry
+	for i, cr := range selected {
+		for _, bd := range bundlesByCat[i] {
+			bm, ok := bd.(map[string]any)
+			if !ok {
+				continue
+			}
+			uuid, _ := bm["uuid"].(string)
+			if uuid == "" || seen[uuid] {
+				continue
+			}
+			seen[uuid] = true
+			name, _ := bm["name"].(string)
+			entries = append(entries, &productEntry{UUID: uuid, Name: name, Category: cr.name, Price: effectivePrice(bm)})
+		}
+	}
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		pi, pj := entries[i].Price, entries[j].Price
+		if pi == nil && pj == nil {
+			return entries[i].Name < entries[j].Name
+		}
+		if pi == nil {
+			return false
+		}
+		if pj == nil {
+			return true
+		}
+		return *pi < *pj
+	})
+	total := len(entries)
+	if in.Limit > 0 && len(entries) > in.Limit {
+		entries = entries[:in.Limit]
+	}
+	return map[string]any{"count": total, "returned": len(entries), "products": entries}, nil
+}
+
+func asSlice(v any) []any {
+	s, _ := v.([]any)
+	return s
+}
+
+func asNum(v any) float64 {
+	if f, ok := v.(float64); ok {
+		return f
+	}
+	return 0
+}
+
+// effectivePrice derives a bundle's display (takeaway "from") price. Simple
+// bundles carry it in price/priceFrom; CUSTOMISED bundles keep it on the base
+// item's variations, so fall back to the lowest positive variation price among
+// the base items.
+func effectivePrice(b map[string]any) *float64 {
+	if p := asNum(b["price"]); p > 0 {
+		return &p
+	}
+	if p := asNum(b["priceFrom"]); p > 0 {
+		return &p
+	}
+	items := asSlice(b["items"])
+	// Prefer the base item(s); fall back to all items if none are tagged.
+	var bases []any
+	for _, it := range items {
+		if im, ok := it.(map[string]any); ok {
+			if t, _ := im["type"].(string); t == "BUNDLE_BASE" {
+				bases = append(bases, it)
+			}
+		}
+	}
+	if len(bases) == 0 {
+		bases = items
+	}
+	var min *float64
+	consider := func(p float64) {
+		if p > 0 && (min == nil || p < *min) {
+			v := p
+			min = &v
+		}
+	}
+	for _, it := range bases {
+		im, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		consider(asNum(im["price"]))
+		for _, c := range asSlice(im["customizations"]) {
+			cm, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, v := range asSlice(cm["variations"]) {
+				if vm, ok := v.(map[string]any); ok {
+					consider(asNum(vm["price"]))
+				}
+			}
+		}
+	}
+	return min
 }
 
 // --- Authenticated user tools ---------------------------------------------
