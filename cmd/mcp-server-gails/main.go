@@ -279,6 +279,46 @@ func main() {
 		},
 	})
 
+	server.AddTool(mcp.Tool{
+		Name:        "adyen_encrypt",
+		Description: "Adyen client-side encryption of a single card field into a JWE blob (RSA-OAEP + A256CBC-HS512), matching the web checkout. No authentication required. Use for 'cvc' (default), 'number', 'expiryMonth', 'expiryYear'.",
+		InputSchema: objSchema(map[string]any{
+			"field": strSchema("Card field name: cvc (default), number, expiryMonth, expiryYear."),
+			"value": strSchema("The plaintext value to encrypt."),
+		}, "value"),
+		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var in app.AdyenEncryptInput
+			if err := decode(raw, &in); err != nil {
+				return nil, err
+			}
+			return service.AdyenEncrypt(ctx, in)
+		},
+	})
+
+	server.AddTool(mcp.Tool{
+		Name:        "pay_with_stored_card",
+		Description: "Initiate payment for an order with a saved card: CSE-encrypts the CVC, assembles the providers[] payload, and calls initiate_payment. WARNING: attempts a real charge (and once any 3DS completes, places a paid order). Requires authentication. CVC may be passed as `cvc` or via the GAILS_CVC env var (preferred). Returns the Adyen action (e.g. a 3DS step) or result.",
+		InputSchema: objSchema(map[string]any{
+			"order_uuid":               strSchema("The order UUID to pay for (from create_order)."),
+			"amount":                   numberSchema("Order amount to charge."),
+			"stored_payment_method_id": strSchema("Saved card id (see get_payment_methods.storedPaymentMethods[].id)."),
+			"brand":                    strSchema("Card brand, e.g. 'mc' or 'visa'."),
+			"cvc":                      strSchema("Card security code. Prefer the GAILS_CVC env var so it is not passed as a tool argument."),
+			"holder_name":              strSchema("Optional cardholder name."),
+			"store":                    strSchema("Store UUID. Defaults to the standard store."),
+			"risk_client_data":         strSchema("Optional Adyen device-fingerprint clientData (base64)."),
+			"redirect_url":             strSchema("Optional redirect URL; defaults to the order-confirmation URL."),
+			"browser_info":             map[string]any{"type": "object", "description": "Optional Adyen browserInfo object; a sensible default is used if omitted."},
+		}, "order_uuid", "amount", "stored_payment_method_id"),
+		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var in app.PayWithStoredCardInput
+			if err := decode(raw, &in); err != nil {
+				return nil, err
+			}
+			return service.PayWithStoredCard(ctx, in)
+		},
+	})
+
 	if err := mcp.Run(context.Background(), server); err != nil {
 		log.Fatal(err)
 	}
