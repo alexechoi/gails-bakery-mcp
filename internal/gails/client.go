@@ -9,6 +9,7 @@ package gails
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -233,6 +234,58 @@ func (c *Client) ensureToken(ctx context.Context) (string, error) {
 	}
 	c.token = ar.Payload.Token.Value
 	return c.token, nil
+}
+
+// TokenUser holds the identity fields the order payload needs, read from the
+// JWT returned at login.
+type TokenUser struct {
+	UUID            string
+	Email           string
+	FirstName       string
+	Phone           string
+	MemberNumber    string
+	ActeolMemberNum string
+}
+
+// UserInfo decodes the (unverified) JWT body to extract the signed-in user's
+// identity. We only read claims we already trust from our own login, so no
+// signature check is required.
+func (c *Client) UserInfo(ctx context.Context) (TokenUser, error) {
+	token, err := c.ensureToken(ctx)
+	if err != nil {
+		return TokenUser{}, err
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return TokenUser{}, fmt.Errorf("unexpected token format")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return TokenUser{}, fmt.Errorf("decode token: %w", err)
+	}
+	var claims struct {
+		User struct {
+			UUID    string `json:"uuid"`
+			Email   string `json:"email"`
+			Profile struct {
+				FirstName          string `json:"firstName"`
+				Phone              string `json:"phone"`
+				MemberNumber       string `json:"memberNumber"`
+				ActeolMemberNumber string `json:"acteolMemberNumber"`
+			} `json:"profile"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return TokenUser{}, fmt.Errorf("parse token claims: %w", err)
+	}
+	return TokenUser{
+		UUID:            claims.User.UUID,
+		Email:           claims.User.Email,
+		FirstName:       claims.User.Profile.FirstName,
+		Phone:           claims.User.Profile.Phone,
+		MemberNumber:    claims.User.Profile.MemberNumber,
+		ActeolMemberNum: claims.User.Profile.ActeolMemberNumber,
+	}, nil
 }
 
 // authHeaders builds the header map for an authenticated request.

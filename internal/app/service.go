@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -569,6 +570,262 @@ func (s *Service) CreateOrder(ctx context.Context, in CreateOrderInput) (any, er
 	}
 	return s.client.JSONAuth(ctx, http.MethodPost, "/order/v1/commands/create", nil, in.Body,
 		map[string]string{"store": gails.DefaultStoreUUID, "menu": gails.DefaultMenuUUID})
+}
+
+type PlaceOrderInput struct {
+	BundleID string         `json:"bundle_id"`
+	Store    string         `json:"store"`
+	Menu     string         `json:"menu"`
+	TimeSlot map[string]any `json:"timeslot"`
+	DateMs   int64          `json:"date_ms"`
+	EatIn    bool           `json:"eat_in"`
+	DryRun   bool           `json:"dry_run"`
+}
+
+// PlaceOrder assembles a complete basket for a single bundle and creates the
+// order. get_order/create_order need the full VMOS basket shape (user,
+// customers, and each bundle grouped into itemTypes[].items[] with
+// finalPrice/subtotals); this builds that from the bundle detail + the
+// signed-in user, so callers don't hand-craft it. With dry_run=true it returns
+// the assembled payload WITHOUT creating an order (no charge, nothing placed)
+// so it can be inspected first. Requires auth.
+func (s *Service) PlaceOrder(ctx context.Context, in PlaceOrderInput) (any, error) {
+	if in.BundleID == "" {
+		return nil, fmt.Errorf("bundle_id is required")
+	}
+	if len(in.TimeSlot) == 0 {
+		return nil, fmt.Errorf("timeslot is required (pass a slot object from get_timeslots)")
+	}
+	store := in.Store
+	if store == "" {
+		store = gails.DefaultStoreUUID
+	}
+	menu := in.Menu
+	if menu == "" {
+		menu = gails.DefaultMenuUUID
+	}
+	headers := catalogHeaders(store, menu, "")
+
+	user, err := s.client.UserInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("selectAllBundleItems", "1")
+	q.Set("provideIsInLayoutStatus", "1")
+	q.Set("forceStockStatus", "1")
+	rawBundle, err := s.client.GetJSON(ctx, "/catalog/bundles/"+url.PathEscape(in.BundleID), q, headers)
+	if err != nil {
+		return nil, err
+	}
+	bundle, ok := rawBundle.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected bundle response")
+	}
+
+	basket, price, err := buildBasketBundle(bundle, store, menu, in.EatIn)
+	if err != nil {
+		return nil, err
+	}
+
+	name := user.FirstName
+	if name == "" {
+		name = "Customer"
+	}
+	customer := map[string]any{
+		"uuid":         user.UUID,
+		"email":        user.Email,
+		"name":         name,
+		"memberNumber": user.MemberNumber,
+	}
+	payload := map[string]any{
+		"timeSlot":                       in.TimeSlot,
+		"takeaway":                       !in.EatIn,
+		"note":                           "",
+		"accessories":                    []any{},
+		"bundles":                        []any{basket},
+		"customers":                      []any{customer},
+		"dateSlot":                       in.DateMs,
+		"isAdditionalInformationEnabled": false,
+		"isAsap":                         false,
+		"isDelivery":                     false,
+		"isOpat":                         false,
+		"locale":                         gails.DefaultLocale,
+		"orderType":                      "takeaway",
+		"payment": map[string]any{
+			"totalAmount":             price,
+			"subtotalAmount":          price,
+			"serviceCharge":           0,
+			"serviceChargePercentage": nil,
+			"price":                   price,
+			"discount":                0,
+		},
+		"promotions": []any{},
+		"toggleCard": nil,
+		"user": map[string]any{
+			"name":               name,
+			"email":              user.Email,
+			"extUserUUID":        user.UUID,
+			"acteolMemberNumber": user.ActeolMemberNum,
+			"address":            map[string]any{"phoneNumber": user.Phone},
+		},
+		"device": map[string]any{
+			"appVersion":     nil,
+			"deviceType":     nil,
+			"platform":       "web",
+			"productVersion": "2.1605.1",
+		},
+	}
+
+	if in.DryRun {
+		return map[string]any{
+			"dryRun":      true,
+			"wouldCharge": price,
+			"payload":     payload,
+		}, nil
+	}
+	return s.client.JSONAuth(ctx, http.MethodPost, "/order/v1/commands/create", nil, payload,
+		map[string]string{"store": store, "menu": menu})
+}
+
+// buildBasketBundle converts a /catalog/bundles detail object into the basket
+// bundle shape the create endpoint expects: items grouped under
+// itemTypes[].items[], with the base item's default variation selected and
+// finalPrice/subtotal fields populated. Returns the basket bundle and its
+// effective price.
+func buildBasketBundle(b map[string]any, store, menu string, eatIn bool) (map[string]any, float64, error) {
+	items := asSlice(b["items"])
+	if len(items) == 0 {
+		return nil, 0, fmt.Errorf("bundle has no items")
+	}
+
+	priceKey := "price"
+	if eatIn {
+		priceKey = "priceEatIn"
+	}
+
+	// Determine the base item's selected-variation price.
+	var price float64
+	for _, it := range items {
+		im, _ := it.(map[string]any)
+		if im == nil {
+			continue
+		}
+		if t, _ := im["type"].(string); t != "BUNDLE_BASE" {
+			continue
+		}
+		for _, c := range asSlice(im["customizations"]) {
+			cm, _ := c.(map[string]any)
+			if cm == nil {
+				continue
+			}
+			vars := asSlice(cm["variations"])
+			def, _ := (cm["meta"].(map[string]any))["defaultValue"].(string)
+			for _, v := range vars {
+				vm, _ := v.(map[string]any)
+				if vm == nil {
+					continue
+				}
+				vp := asNum(vm[priceKey])
+				if vp == 0 {
+					vp = asNum(vm["price"])
+				}
+				if def != "" {
+					if id, _ := vm["uuid"].(string); id == def && vp > 0 {
+						price = vp
+					}
+				} else if vp > 0 && price == 0 {
+					price = vp
+				}
+			}
+		}
+		if im["finalPrice"] == nil {
+			im["finalPrice"] = price
+		}
+	}
+	if price == 0 {
+		if p := effectivePrice(b); p != nil {
+			price = *p
+		}
+	}
+
+	// Group items under their itemType.
+	order := []string{}
+	byType := map[string][]any{}
+	typeObj := map[string]map[string]any{}
+	for _, it := range items {
+		im, _ := it.(map[string]any)
+		if im == nil {
+			continue
+		}
+		itp, _ := im["itemType"].(map[string]any)
+		if itp == nil {
+			continue
+		}
+		id, _ := itp["uuid"].(string)
+		if _, seen := typeObj[id]; !seen {
+			typeObj[id] = itp
+			order = append(order, id)
+		}
+		byType[id] = append(byType[id], im)
+	}
+	var itemTypes []any
+	for _, id := range order {
+		t := map[string]any{}
+		for k, v := range typeObj[id] {
+			t[k] = v
+		}
+		t["items"] = byType[id]
+		itemTypes = append(itemTypes, t)
+	}
+
+	// defaultItems: the base item(s) with their current size selection.
+	var defaultItems []any
+	for _, it := range items {
+		im, _ := it.(map[string]any)
+		if im == nil {
+			continue
+		}
+		if t, _ := im["type"].(string); t != "BUNDLE_BASE" {
+			continue
+		}
+		defaultItems = append(defaultItems, map[string]any{
+			"itemUUID":       im["itemUUID"],
+			"name":           im["name"],
+			"customizations": []any{map[string]any{"current": 0, "type": "size"}},
+		})
+	}
+
+	basket := map[string]any{}
+	for k, v := range b {
+		basket[k] = v
+	}
+	basket["itemTypes"] = itemTypes
+	basket["basketUUID"] = randomID()
+	basket["finalPrice"] = price
+	basket["price"] = 0
+	basket["priceEatIn"] = 0
+	basket["subtotalAmount"] = price
+	basket["subtotalAmountIncludingTax"] = price
+	basket["storeUUID"] = store
+	basket["menuUUID"] = menu
+	basket["defaultItems"] = defaultItems
+	basket["isRecommendation"] = false
+	return basket, price, nil
+}
+
+// randomID returns a short nanoid-like token for basketUUID. It avoids
+// crypto/rand-vs-determinism concerns; uniqueness within an order is enough.
+func randomID() string {
+	const alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	b := make([]byte, 21)
+	if _, err := crand.Read(b); err != nil {
+		return fmt.Sprintf("basket-%d", len(alphabet))
+	}
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b)
 }
 
 type InitiatePaymentInput struct {
