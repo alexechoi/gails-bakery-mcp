@@ -8,19 +8,41 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/alexechoi/gails-bakery-mcp/internal/adyen"
 	"github.com/alexechoi/gails-bakery-mcp/internal/gails"
 )
 
 type Service struct {
 	client *gails.Client
+
+	encMu sync.Mutex
+	enc   *adyen.Encryptor
 }
 
 func NewService(client *gails.Client) *Service {
 	return &Service{client: client}
+}
+
+// encryptor lazily fetches the Adyen public key (once) and caches an Encryptor.
+// The client key may be overridden via GAILS_ADYEN_CLIENT_KEY.
+func (s *Service) encryptor(ctx context.Context) (*adyen.Encryptor, error) {
+	s.encMu.Lock()
+	defer s.encMu.Unlock()
+	if s.enc != nil {
+		return s.enc, nil
+	}
+	e, err := adyen.FetchEncryptor(ctx, http.DefaultClient, os.Getenv("GAILS_ADYEN_CLIENT_KEY"))
+	if err != nil {
+		return nil, err
+	}
+	s.enc = e
+	return e, nil
 }
 
 // catalogHeaders builds the store/menu/locale headers used by catalog calls.
@@ -351,6 +373,141 @@ func (s *Service) ConfirmPayment(ctx context.Context, in ConfirmPaymentInput) (a
 	q.Set("transactionUUID", in.TransactionUUID)
 	path := "/payment/v2/transactions/order/" + url.PathEscape(in.OrderUUID) + "/confirm"
 	return s.client.JSONAuth(ctx, http.MethodPost, path, q, map[string]any{"details": in.Details}, nil)
+}
+
+// --- Adyen client-side encryption ----------------------------------------
+
+type AdyenEncryptInput struct {
+	Field string `json:"field"`
+	Value string `json:"value"`
+}
+
+// AdyenEncrypt encrypts a single card field (e.g. "cvc", "number",
+// "expiryMonth", "expiryYear") into an Adyen JWE blob, matching the blobs the
+// web checkout produces. No authentication required.
+func (s *Service) AdyenEncrypt(ctx context.Context, in AdyenEncryptInput) (any, error) {
+	field := in.Field
+	if field == "" {
+		field = "cvc"
+	}
+	if in.Value == "" {
+		return nil, fmt.Errorf("value is required")
+	}
+	e, err := s.encryptor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	blob, err := e.EncryptField(field, in.Value, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{"field": field, "encrypted": blob}, nil
+}
+
+type PayWithStoredCardInput struct {
+	OrderUUID             string         `json:"order_uuid"`
+	Amount                float64        `json:"amount"`
+	StoredPaymentMethodID string         `json:"stored_payment_method_id"`
+	Brand                 string         `json:"brand"`
+	CVC                   string         `json:"cvc"`
+	HolderName            string         `json:"holder_name"`
+	Store                 string         `json:"store"`
+	RiskClientData        string         `json:"risk_client_data"`
+	RedirectURL           string         `json:"redirect_url"`
+	BrowserInfo           map[string]any `json:"browser_info"`
+}
+
+// PayWithStoredCard initiates payment for an order using a saved card. It
+// CSE-encrypts the CVC and assembles the providers[] payload, then calls
+// /payment/v2/transactions/order. WARNING: this attempts a real charge and,
+// once any required 3DS completes, places a paid order. Requires auth.
+//
+// The CVC may be supplied via the cvc argument or the GAILS_CVC environment
+// variable (preferred, so it never appears in tool arguments).
+func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInput) (any, error) {
+	if in.OrderUUID == "" {
+		return nil, fmt.Errorf("order_uuid is required")
+	}
+	if in.Amount <= 0 {
+		return nil, fmt.Errorf("amount must be greater than 0")
+	}
+	if in.StoredPaymentMethodID == "" {
+		return nil, fmt.Errorf("stored_payment_method_id is required (see get_payment_methods)")
+	}
+	cvc := in.CVC
+	if cvc == "" {
+		cvc = os.Getenv("GAILS_CVC")
+	}
+	if cvc == "" {
+		return nil, fmt.Errorf("cvc is required (pass cvc or set GAILS_CVC)")
+	}
+
+	e, err := s.encryptor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	encryptedCVC, err := e.EncryptField("cvc", cvc, time.Now())
+	if err != nil {
+		return nil, err
+	}
+
+	store := in.Store
+	if store == "" {
+		store = gails.DefaultStoreUUID
+	}
+	redirectURL := in.RedirectURL
+	if redirectURL == "" {
+		redirectURL = fmt.Sprintf("https://gails.vmos.io/store/%s/order-confirmation/%s", store, in.OrderUUID)
+	}
+	browserInfo := in.BrowserInfo
+	if browserInfo == nil {
+		browserInfo = map[string]any{
+			"acceptHeader":   "*/*",
+			"colorDepth":     30,
+			"language":       "en-GB",
+			"javaEnabled":    false,
+			"screenHeight":   982,
+			"screenWidth":    1512,
+			"userAgent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+			"timeZoneOffset": -60,
+		}
+	}
+
+	meta := map[string]any{
+		"storeUUID":                store,
+		"returnUrl":                nil,
+		"redirectUrl":              redirectURL,
+		"origin":                   "https://gails.vmos.io",
+		"browserInfo":              browserInfo,
+		"redirectFromIssuerMethod": "POST",
+		"redirectToIssuerMethod":   "GET",
+		"channel":                  nil,
+	}
+	if in.RiskClientData != "" {
+		meta["riskData"] = map[string]any{"clientData": in.RiskClientData}
+	}
+
+	paymentMethod := map[string]any{
+		"type":                  "scheme",
+		"holderName":            in.HolderName,
+		"encryptedSecurityCode": encryptedCVC,
+		"storedPaymentMethodId": in.StoredPaymentMethodID,
+	}
+	if in.Brand != "" {
+		paymentMethod["brand"] = in.Brand
+	}
+
+	body := map[string]any{
+		"providers": []any{map[string]any{
+			"amount":        in.Amount,
+			"meta":          meta,
+			"paymentMethod": paymentMethod,
+			"uuid":          gails.DefaultPaymentProviderUUID,
+		}},
+		"order": map[string]any{"uuid": in.OrderUUID, "amount": in.Amount},
+	}
+	return s.client.JSONAuth(ctx, http.MethodPost, "/payment/v2/transactions/order", nil, body,
+		map[string]string{"store": store})
 }
 
 // geocodePostcode resolves a UK postcode to lat/long via the free postcodes.io

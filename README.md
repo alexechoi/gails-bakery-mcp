@@ -41,7 +41,11 @@ go build -o gails-mcp ./cmd/mcp-server-gails
 | `get_transactions`   | Payment transaction details for given order UUIDs.     |
 | `create_order`       | Create an order from a basket (checkout step 1; no charge). |
 | `initiate_payment`   | Start payment for an order (checkout step 2; returns 3DS action). |
+| `pay_with_stored_card`| Encrypt the CVC and start payment with a saved card. ⚠️ attempts a real charge. |
 | `confirm_payment`    | Confirm/finalise payment for an order. ⚠️ places a real, paid order. |
+
+`adyen_encrypt` (public, no auth) performs Adyen client-side encryption of a
+single card field into a JWE blob — see below.
 
 ## Checkout flow
 
@@ -55,11 +59,29 @@ The full ordering sequence maps to three tools:
 3. **`confirm_payment`** → `POST …/order/{uuid}/confirm?transactionUUID=…` with
    `{"details":{"threeDSResult":"…"}}` — finalises the paid order.
 
-> **Card data / CVC:** card number, expiry and CVC are never sent in plaintext.
-> They must be encrypted client-side by Adyen Web (`adyen.js`) into the
-> `encryptedCardNumber` / `encryptedSecurityCode` blobs before being passed to
-> `initiate_payment`. This server does not perform Adyen client-side encryption;
-> supply the already-encrypted `paymentMethod` object in the `body`.
+### Card data / CVC and Adyen CSE
+
+Card number, expiry and CVC are never sent in plaintext — they are encrypted
+into JWE blobs (`alg=RSA-OAEP`, `enc=A256CBC-HS512`, `version:1`) before being
+sent. This server performs that **Adyen client-side encryption** itself
+(`internal/adyen`): it fetches the RSA public key from
+`…/checkoutshopper/v1/clientKeys/{clientKey}` and encrypts each field with a
+`generationtime`, exactly matching Adyen Web.
+
+- **`adyen_encrypt`** encrypts one field (`cvc`, `number`, `expiryMonth`,
+  `expiryYear`) — handy for building a payment payload by hand.
+- **`pay_with_stored_card`** is the headless path for a **saved card**: it only
+  needs the CVC (the saved card needs no PAN). It encrypts the CVC, builds the
+  `providers[]` payload, and calls `/payment/v2/transactions/order`.
+
+> **Security:** prefer supplying the CVC via the **`GAILS_CVC`** environment
+> variable rather than the `cvc` tool argument, so it never appears in
+> tool-call arguments / model context. The client key may be overridden with
+> `GAILS_ADYEN_CLIENT_KEY` (it is not a secret — it ships in the web page).
+>
+> A brand-new card (not a saved one) still triggers an interactive 3DS
+> challenge that cannot be completed headlessly; the saved-card path is the
+> one designed for automation.
 
 > **Note:** the exact upstream path for order history is tenant-specific and
 > was not confirmed during development. `order_history` therefore takes a
