@@ -303,6 +303,38 @@ func (s *Service) GetTransactions(ctx context.Context, in GetTransactionsInput) 
 		map[string]any{"orders": in.Orders}, nil)
 }
 
+type CreateOrderInput struct {
+	Body map[string]any `json:"body"`
+}
+
+// CreateOrder creates an order from a basket payload (bundles, timeSlot,
+// customers, payment, user, device) and returns the created order (incl. its
+// UUID). This is step 1 of checkout; it does not charge the customer. Requires
+// auth.
+func (s *Service) CreateOrder(ctx context.Context, in CreateOrderInput) (any, error) {
+	if len(in.Body) == 0 {
+		return nil, fmt.Errorf("body (order payload) is required")
+	}
+	return s.client.JSONAuth(ctx, http.MethodPost, "/order/v1/commands/create", nil, in.Body,
+		map[string]string{"store": gails.DefaultStoreUUID, "menu": gails.DefaultMenuUUID})
+}
+
+type InitiatePaymentInput struct {
+	Body map[string]any `json:"body"`
+}
+
+// InitiatePayment starts payment for an order (step 2 of checkout). The body
+// carries providers[] including an Adyen-encrypted paymentMethod (the
+// encrypted card / CVC blobs produced client-side by Adyen Web), browserInfo,
+// riskData, and order:{uuid,amount}. It returns an Adyen 3DS action whose
+// result feeds confirm_payment. Requires auth.
+func (s *Service) InitiatePayment(ctx context.Context, in InitiatePaymentInput) (any, error) {
+	if len(in.Body) == 0 {
+		return nil, fmt.Errorf("body (payment payload incl. providers[] and order) is required")
+	}
+	return s.client.JSONAuth(ctx, http.MethodPost, "/payment/v2/transactions/order", nil, in.Body, nil)
+}
+
 type ConfirmPaymentInput struct {
 	OrderUUID       string         `json:"order_uuid"`
 	TransactionUUID string         `json:"transaction_uuid"`

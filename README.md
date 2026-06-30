@@ -39,7 +39,27 @@ go build -o gails-mcp ./cmd/mcp-server-gails
 | `get_user_promotions`| Promotions/rewards applicable to a basket.             |
 | `apply_promotion`    | Apply a promotion to a basket; returns adjusted basket.|
 | `get_transactions`   | Payment transaction details for given order UUIDs.     |
+| `create_order`       | Create an order from a basket (checkout step 1; no charge). |
+| `initiate_payment`   | Start payment for an order (checkout step 2; returns 3DS action). |
 | `confirm_payment`    | Confirm/finalise payment for an order. ⚠️ places a real, paid order. |
+
+## Checkout flow
+
+The full ordering sequence maps to three tools:
+
+1. **`create_order`** → `POST /order/v1/commands/create` — builds the order from the
+   basket and returns its UUID. No card data, no charge.
+2. **`initiate_payment`** → `POST /payment/v2/transactions/order` — submits the
+   Adyen-encrypted `paymentMethod` (incl. the encrypted CVC) plus `browserInfo`
+   and `order:{uuid,amount}`; returns an Adyen 3DS action.
+3. **`confirm_payment`** → `POST …/order/{uuid}/confirm?transactionUUID=…` with
+   `{"details":{"threeDSResult":"…"}}` — finalises the paid order.
+
+> **Card data / CVC:** card number, expiry and CVC are never sent in plaintext.
+> They must be encrypted client-side by Adyen Web (`adyen.js`) into the
+> `encryptedCardNumber` / `encryptedSecurityCode` blobs before being passed to
+> `initiate_payment`. This server does not perform Adyen client-side encryption;
+> supply the already-encrypted `paymentMethod` object in the `body`.
 
 > **Note:** the exact upstream path for order history is tenant-specific and
 > was not confirmed during development. `order_history` therefore takes a

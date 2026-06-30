@@ -233,6 +233,36 @@ func main() {
 	})
 
 	server.AddTool(mcp.Tool{
+		Name:        "create_order",
+		Description: "Create an order from a basket payload (step 1 of checkout — does not charge). Requires authentication. `body` is the full order payload (bundles, timeSlot, customers, payment, user, device). Returns the created order incl. its UUID.",
+		InputSchema: objSchema(map[string]any{
+			"body": map[string]any{"type": "object", "description": "The full order/basket payload."},
+		}, "body"),
+		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var in app.CreateOrderInput
+			if err := decode(raw, &in); err != nil {
+				return nil, err
+			}
+			return service.CreateOrder(ctx, in)
+		},
+	})
+
+	server.AddTool(mcp.Tool{
+		Name:        "initiate_payment",
+		Description: "Initiate payment for an order (step 2 of checkout). Requires authentication. `body` carries providers[] with an Adyen-encrypted paymentMethod (encrypted card/CVC blobs produced client-side by Adyen Web), browserInfo, riskData, and order:{uuid,amount}. Returns an Adyen 3DS action whose result feeds confirm_payment.",
+		InputSchema: objSchema(map[string]any{
+			"body": map[string]any{"type": "object", "description": "The payment payload incl. providers[] and order."},
+		}, "body"),
+		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var in app.InitiatePaymentInput
+			if err := decode(raw, &in); err != nil {
+				return nil, err
+			}
+			return service.InitiatePayment(ctx, in)
+		},
+	})
+
+	server.AddTool(mcp.Tool{
 		Name:        "confirm_payment",
 		Description: "Confirm/finalise a payment for an order (e.g. submitting a 3DS result). WARNING: this places a real, paid order. Requires authentication.",
 		InputSchema: objSchema(map[string]any{
