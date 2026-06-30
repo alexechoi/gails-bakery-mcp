@@ -30,6 +30,9 @@ const (
 	DefaultMenuUUID  = "b8e28ac3-4d9a-48ea-969a-03702840c5cd"
 	DefaultLocale    = "en-GB"
 
+	// Adyen payment provider used by the Gail's web checkout.
+	DefaultPaymentProviderUUID = "b46b4168-961a-40c3-9f9b-e8909abd7589"
+
 	originHeader  = "https://gails.vmos.io"
 	refererHeader = "https://gails.vmos.io/"
 	userAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"

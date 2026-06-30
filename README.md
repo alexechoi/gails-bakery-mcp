@@ -20,9 +20,10 @@ go build -o gails-mcp ./cmd/mcp-server-gails
 
 | Tool          | Description                                                        |
 |---------------|--------------------------------------------------------------------|
-| `find_stores` | Find stores near a postcode (auto-geocoded) or lat/long.           |
-| `get_menu`    | Get the menu for a store (defaults to the standard Click&Collect). |
-| `get_product` | Get full product/bundle detail incl. modifiers, by bundle UUID.    |
+| `find_stores`   | Find stores near a postcode (auto-geocoded) or lat/long.         |
+| `get_menu`      | Get the menu for a store (defaults to the standard Click&Collect).|
+| `get_product`   | Get full product/bundle detail incl. modifiers, by bundle UUID.  |
+| `get_timeslots` | List collection time slots for a date and basket amount.         |
 
 ### Authenticated (require `GAILS_EMAIL` / `GAILS_PASSWORD`)
 
@@ -34,6 +35,11 @@ go build -o gails-mcp ./cmd/mcp-server-gails
 | `get_loyalty_points` | Loyalty points balance and rewards.                    |
 | `get_referrer_code`  | The user's referral code.                              |
 | `order_history`      | Past orders (see note below).                          |
+| `get_payment_methods`| Available and stored payment methods.                  |
+| `get_user_promotions`| Promotions/rewards applicable to a basket.             |
+| `apply_promotion`    | Apply a promotion to a basket; returns adjusted basket.|
+| `get_transactions`   | Payment transaction details for given order UUIDs.     |
+| `confirm_payment`    | Confirm/finalise payment for an order. ⚠️ places a real, paid order. |
 
 > **Note:** the exact upstream path for order history is tenant-specific and
 > was not confirmed during development. `order_history` therefore takes a

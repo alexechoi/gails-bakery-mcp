@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/60xAI/gails-bakery-mcp/internal/gails"
+	"github.com/alexechoi/gails-bakery-mcp/internal/gails"
 )
 
 type Service struct {
@@ -196,6 +196,129 @@ func (s *Service) OrderHistory(ctx context.Context, in OrderHistoryInput) (any, 
 		store = gails.DefaultStoreUUID
 	}
 	return s.client.GetJSONAuth(ctx, path, q, map[string]string{"store": store})
+}
+
+// --- Ordering & payment tools ---------------------------------------------
+
+type TimeslotsInput struct {
+	Date         string  `json:"date"`
+	DateMs       int64   `json:"date_ms"`
+	BasketAmount float64 `json:"basket_amount"`
+	Store        string  `json:"store"`
+	Menu         string  `json:"menu"`
+}
+
+// GetTimeslots lists collection time slots for a date and basket amount. No
+// authentication required.
+func (s *Service) GetTimeslots(ctx context.Context, in TimeslotsInput) (any, error) {
+	dateMs := in.DateMs
+	if dateMs == 0 && in.Date != "" {
+		loc, err := time.LoadLocation("Europe/London")
+		if err != nil {
+			loc = time.UTC
+		}
+		t, err := time.ParseInLocation("2006-01-02", in.Date, loc)
+		if err != nil {
+			return nil, fmt.Errorf("invalid date %q (use YYYY-MM-DD): %w", in.Date, err)
+		}
+		dateMs = t.UnixMilli()
+	}
+	if dateMs == 0 {
+		return nil, fmt.Errorf("provide date (YYYY-MM-DD) or date_ms (epoch milliseconds)")
+	}
+	q := url.Values{}
+	q.Set("dateSlot", strconv.FormatInt(dateMs, 10))
+	q.Set("basketAmount", strconv.FormatFloat(in.BasketAmount, 'f', -1, 64))
+	return s.client.GetJSON(ctx, "/tenant/v1/timeslots", q, catalogHeaders(in.Store, in.Menu, ""))
+}
+
+type PaymentMethodsInput struct {
+	ProviderUUID string `json:"provider_uuid"`
+	Store        string `json:"store"`
+}
+
+// GetPaymentMethods lists available and stored payment methods. Requires auth.
+func (s *Service) GetPaymentMethods(ctx context.Context, in PaymentMethodsInput) (any, error) {
+	provider := in.ProviderUUID
+	if provider == "" {
+		provider = gails.DefaultPaymentProviderUUID
+	}
+	q := url.Values{}
+	q.Set("providerUUID", provider)
+	store := in.Store
+	if store == "" {
+		store = gails.DefaultStoreUUID
+	}
+	return s.client.GetJSONAuth(ctx, "/payment/v2/payment-methods", q, map[string]string{"store": store})
+}
+
+type UserPromotionsInput struct {
+	Body map[string]any `json:"body"`
+}
+
+// GetUserPromotions returns promotions/rewards applicable to a basket. Requires
+// auth. body is the basket payload (products, promotions, payment, ...).
+func (s *Service) GetUserPromotions(ctx context.Context, in UserPromotionsInput) (any, error) {
+	if len(in.Body) == 0 {
+		return nil, fmt.Errorf("body (basket payload) is required")
+	}
+	return s.client.JSONAuth(ctx, http.MethodPost, "/loyalty/promotions/user", nil, in.Body,
+		map[string]string{"locale": gails.DefaultLocale, "platform": "web"})
+}
+
+type ApplyPromotionInput struct {
+	PromotionID string         `json:"promotion_id"`
+	Body        map[string]any `json:"body"`
+}
+
+// ApplyPromotion applies a promotion to a basket and returns the adjusted
+// basket. Requires auth.
+func (s *Service) ApplyPromotion(ctx context.Context, in ApplyPromotionInput) (any, error) {
+	if in.PromotionID == "" {
+		return nil, fmt.Errorf("promotion_id is required")
+	}
+	if len(in.Body) == 0 {
+		return nil, fmt.Errorf("body (basket payload) is required")
+	}
+	path := "/loyalty/promotions/v2/" + url.PathEscape(in.PromotionID) + "/apply"
+	return s.client.JSONAuth(ctx, http.MethodPost, path, nil, in.Body, map[string]string{"platform": "web"})
+}
+
+type GetTransactionsInput struct {
+	Orders  []string `json:"orders"`
+	Details bool     `json:"details"`
+}
+
+// GetTransactions fetches payment transaction details for the given order
+// UUIDs. Requires auth.
+func (s *Service) GetTransactions(ctx context.Context, in GetTransactionsInput) (any, error) {
+	if len(in.Orders) == 0 {
+		return nil, fmt.Errorf("orders (list of order UUIDs) is required")
+	}
+	q := url.Values{}
+	if in.Details {
+		q.Set("details", "true")
+	}
+	return s.client.JSONAuth(ctx, http.MethodPost, "/payment/v2/transactions", q,
+		map[string]any{"orders": in.Orders}, nil)
+}
+
+type ConfirmPaymentInput struct {
+	OrderUUID       string         `json:"order_uuid"`
+	TransactionUUID string         `json:"transaction_uuid"`
+	Details         map[string]any `json:"details"`
+}
+
+// ConfirmPayment confirms (finalises) a payment for an order — e.g. submitting
+// a 3DS result. This places a real, paid order; use with care. Requires auth.
+func (s *Service) ConfirmPayment(ctx context.Context, in ConfirmPaymentInput) (any, error) {
+	if in.OrderUUID == "" || in.TransactionUUID == "" {
+		return nil, fmt.Errorf("order_uuid and transaction_uuid are required")
+	}
+	q := url.Values{}
+	q.Set("transactionUUID", in.TransactionUUID)
+	path := "/payment/v2/transactions/order/" + url.PathEscape(in.OrderUUID) + "/confirm"
+	return s.client.JSONAuth(ctx, http.MethodPost, path, q, map[string]any{"details": in.Details}, nil)
 }
 
 // geocodePostcode resolves a UK postcode to lat/long via the free postcodes.io
