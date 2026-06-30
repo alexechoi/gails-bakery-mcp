@@ -282,6 +282,27 @@ func main() {
 	})
 
 	server.AddTool(mcp.Tool{
+		Name:        "place_order",
+		Description: "Assemble a complete basket for a single product and create the order. Use this instead of create_order — it builds the full VMOS basket (user, customers, grouped itemTypes/items, prices) from the bundle_id + timeslot, so you don't hand-craft it. Set dry_run=true to inspect the exact payload and the amount that would be charged WITHOUT creating anything. Without dry_run it creates a real (unpaid) order; pay separately with pay_with_stored_card. Requires authentication.",
+		InputSchema: objSchema(map[string]any{
+			"bundle_id": strSchema("The product/bundle UUID to order (from list_products)."),
+			"timeslot":  map[string]any{"type": "object", "description": "A collection slot object from get_timeslots (the whole object, e.g. {uuid, slot, weekday, timezone, ...})."},
+			"date_ms":   intSchema("Collection date as epoch milliseconds (same dateSlot used for get_timeslots)."),
+			"store":     strSchema("Store UUID. Defaults to the standard store."),
+			"menu":      strSchema("Menu UUID. Defaults to the standard menu."),
+			"eat_in":    boolSchema("Eat-in pricing instead of takeaway. Defaults to false (takeaway)."),
+			"dry_run":   boolSchema("If true, return the assembled payload + amount without creating the order."),
+		}, "bundle_id", "timeslot"),
+		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var in app.PlaceOrderInput
+			if err := decode(raw, &in); err != nil {
+				return nil, err
+			}
+			return service.PlaceOrder(ctx, in)
+		},
+	})
+
+	server.AddTool(mcp.Tool{
 		Name:        "initiate_payment",
 		Description: "Initiate payment for an order (step 2 of checkout). Requires authentication. `body` carries providers[] with an Adyen-encrypted paymentMethod (encrypted card/CVC blobs produced client-side by Adyen Web), browserInfo, riskData, and order:{uuid,amount}. Returns an Adyen 3DS action whose result feeds confirm_payment.",
 		InputSchema: objSchema(map[string]any{
