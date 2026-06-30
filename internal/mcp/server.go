@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 )
 
 const protocolVersion = "2025-06-18"
@@ -158,12 +159,20 @@ func (s *Server) handleOne(ctx context.Context, raw json.RawMessage) (response, 
 }
 
 func toolSuccessResult(result any) map[string]any {
+	// Per the MCP spec, structuredContent must be a JSON object. Several tools
+	// return a top-level array (e.g. a store/menu list) or a scalar (e.g. a
+	// referral code), so wrap anything that isn't already an object under a
+	// "result" key. The human-readable text content keeps the raw shape.
+	structured := result
+	if rv := reflect.ValueOf(result); !rv.IsValid() || rv.Kind() != reflect.Map {
+		structured = map[string]any{"result": result}
+	}
 	return map[string]any{
 		"content": []map[string]any{{
 			"type": "text",
 			"text": marshalPretty(result),
 		}},
-		"structuredContent": result,
+		"structuredContent": structured,
 		"isError":           false,
 	}
 }
