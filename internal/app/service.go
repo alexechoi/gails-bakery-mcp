@@ -1257,12 +1257,17 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 	}
 	out["fingerprint"] = fpResp
 
-	// Escalated to an interactive challenge? Hand it to the clickable flow.
+	// Escalated to an interactive challenge? Hand the ORIGINAL action to the
+	// browser so Adyen Web runs the full 3DS in-browser (fingerprint +
+	// challenge) with real device data — the bank's challenge page only frames
+	// correctly when the browser did the fingerprint. Passing the server-side
+	// challenge action instead makes the ACS serve an error page (which is
+	// X-Frame-Options: SAMEORIGIN → "refused to connect").
 	if ch, _ := deepFind(fpResp, "action").(map[string]any); ch != nil && deepFindString(ch, "subtype") == "challenge" {
 		out["status"] = "3ds_challenge_required"
-		if prep, perr := s.Prepare3DS(ctx, Prepare3DSInput{Action: ch, OrderUUID: in.OrderUUID, TransactionUUID: txn, Amount: in.Amount, Store: store}); perr != nil {
+		if prep, perr := s.Prepare3DS(ctx, Prepare3DSInput{Action: action, OrderUUID: in.OrderUUID, TransactionUUID: txn, Amount: in.Amount, Store: store}); perr != nil {
 			out["challengeError"] = perr.Error()
-			out["challengeAction"] = ch
+			out["challengeAction"] = action
 		} else {
 			out["challenge"] = prep
 		}
