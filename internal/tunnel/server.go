@@ -13,6 +13,9 @@ func (m *Manager) mux() http.Handler {
 	mux.HandleFunc("/pay/", m.handlePay)
 	mux.HandleFunc("/complete/", m.handleComplete)
 	mux.HandleFunc("/return/", m.handleReturn)
+	mux.HandleFunc("/hpay/", m.handleHybridPay)
+	mux.HandleFunc("/hmethod/", m.handleHybridMethod)
+	mux.HandleFunc("/hfinal/", m.handleHybridFinal)
 	mux.HandleFunc("/status/", m.handleStatus)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "service": "gails-3ds-challenge"})

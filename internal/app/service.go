@@ -1135,6 +1135,7 @@ type PayWithStoredCardInput struct {
 	BrowserInfo           map[string]any `json:"browser_info"`
 	ManualOnly            bool           `json:"manual_only"`
 	Redirect3DS           bool           `json:"redirect_3ds"`
+	Hybrid3DS             bool           `json:"hybrid_3ds"`
 }
 
 // PayWithStoredCard initiates payment for an order using a saved card. It
@@ -1256,6 +1257,15 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 	resultCode := deepFindString(initResp, "resultCode")
 	txn := deepFindString(initResp, "transactionUUID", "transactionUuid")
 	if txn == "" {
+		// The initiate response is an array of provider transactions; the
+		// transaction UUID is the first element's own "uuid".
+		if arr, ok := initResp.([]any); ok && len(arr) > 0 {
+			if m0, ok := arr[0].(map[string]any); ok {
+				txn, _ = m0["uuid"].(string)
+			}
+		}
+	}
+	if txn == "" {
 		txn = deepFindString(deepFind(initResp, "transaction", "transactions"), "uuid")
 	}
 	out["resultCode"] = resultCode
@@ -1271,6 +1281,27 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 	}
 
 	action, _ := deepFind(initResp, "action").(map[string]any)
+
+	// Hybrid native-3DS2 mode: drive the full 3DS (method + challenge) in the
+	// browser via form-POSTs to the ACS (no CORS / no X-Frame-Options), then
+	// finalise server-side. Returns a pay_url that auto-confirms on approval.
+	if in.Hybrid3DS {
+		if action == nil {
+			out["status"] = "authorised_or_no_action"
+			return out, nil
+		}
+		prep, herr := s.tunnelMgr().PrepareHybrid(ctx, tunnel.HybridInput{
+			OrderUUID: in.OrderUUID, TransactionUUID: txn, Store: store, Amount: in.Amount, Action: action,
+		})
+		if herr != nil {
+			return nil, herr
+		}
+		out["status"] = "3ds_hybrid_required"
+		out["pay_url"] = prep["pay_url"]
+		out["status_url"] = prep["status_url"]
+		out["instructions"] = "Open pay_url: it runs the bank's 3-D Secure end-to-end (device method + challenge) and confirms the order automatically once you approve — no button needed. Poll status_url or get_transactions."
+		return out, nil
+	}
 
 	// Redirect-3DS mode: hand the action to the browser page. Adyen Web
 	// auto-redirects top-level for a redirect action; the bank sends the shopper

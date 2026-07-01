@@ -384,7 +384,8 @@ func main() {
 			"redirect_url":             strSchema("Optional redirect URL; defaults to the order-confirmation URL."),
 			"browser_info":             map[string]any{"type": "object", "description": "Optional Adyen browserInfo object; a sensible default is used if omitted."},
 			"manual_only":              boolSchema("If true, only initiate and return the raw 3DS action without auto-completing the fingerprint. Default false (frictionless-first)."),
-			"redirect_3ds":             boolSchema("Sets our own returnUrl for a redirect-style 3DS. NOTE: this tenant's Adyen does not offer a client-selectable redirect flow (browserInfo is mandatory → native 3DS2), so a challenged payment must be completed on gails.vmos.io. Leaving this false is recommended."),
+			"redirect_3ds":             boolSchema("Sets our own returnUrl for a redirect-style 3DS. NOTE: this tenant's Adyen does not offer a client-selectable redirect flow (browserInfo is mandatory → native 3DS2). Prefer hybrid_3ds."),
+			"hybrid_3ds":               boolSchema("Recommended for a challenged card. Returns a pay_url that runs the bank's full native 3-D Secure in the browser (device method + challenge, form-POST to the ACS, no CORS/iframe wall) and confirms the order automatically when the shopper approves."),
 		}, "order_uuid", "amount", "stored_payment_method_id"),
 		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var in app.PayWithStoredCardInput
