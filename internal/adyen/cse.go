@@ -28,6 +28,21 @@ import (
 // checkout. It is not a secret (it ships in the page) but can be overridden.
 const DefaultClientKey = "live_G5EJ4AY3DBF6RPG4DERDWBCIGMK4REAT"
 
+// Shared header values for Adyen requests originating from the Gail's site.
+const (
+	originHeader  = "https://gails.vmos.io"
+	refererHeader = "https://gails.vmos.io/"
+)
+
+// snippet truncates a response body for error messages.
+func snippet(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) > 300 {
+		s = s[:300] + "…"
+	}
+	return s
+}
+
 const publicKeyBase = "https://checkoutshopper-live.adyen.com/checkoutshopper/v1/clientKeys/"
 
 // Encryptor encrypts card fields with a fetched Adyen public key.

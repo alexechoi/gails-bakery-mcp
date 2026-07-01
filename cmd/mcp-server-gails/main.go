@@ -318,6 +318,25 @@ func main() {
 	})
 
 	server.AddTool(mcp.Tool{
+		Name:        "prepare_3ds_challenge",
+		Description: "When pay_with_stored_card returns a 3-D Secure `action` (bank verification required), pass that action here to get a clickable URL. The shopper opens it, completes the bank check (e.g. approves in their banking app), and the order is confirmed automatically. Extract `action`, and the transaction UUID, from the pay_with_stored_card response. Requires the companion challenge server to be running (GAILS_3DS_SERVER).",
+		InputSchema: objSchema(map[string]any{
+			"action":           map[string]any{"type": "object", "description": "The 3DS `action` object returned by pay_with_stored_card."},
+			"order_uuid":       strSchema("The order UUID being paid for."),
+			"transaction_uuid": strSchema("The payment transaction UUID (from the pay_with_stored_card response)."),
+			"amount":           numberSchema("Order amount, for display on the verification page."),
+			"store":            strSchema("Store UUID. Defaults to the standard store."),
+		}, "action", "order_uuid", "transaction_uuid"),
+		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var in app.Prepare3DSInput
+			if err := decode(raw, &in); err != nil {
+				return nil, err
+			}
+			return service.Prepare3DS(ctx, in)
+		},
+	})
+
+	server.AddTool(mcp.Tool{
 		Name:        "confirm_payment",
 		Description: "Confirm/finalise a payment for an order (e.g. submitting a 3DS result). WARNING: this places a real, paid order. Requires authentication.",
 		InputSchema: objSchema(map[string]any{
