@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -150,7 +151,65 @@ func (s *Service) FindStores(ctx context.Context, in FindStoresInput) (any, erro
 		}
 	}
 	q.Set("weekday", strconv.Itoa(weekday))
-	return s.client.GetJSON(ctx, "/tenant/v1/stores/tenant", q, nil)
+	raw, err := s.client.GetJSON(ctx, "/tenant/v1/stores/tenant", q, nil)
+	if err != nil {
+		return nil, err
+	}
+	// The API's own `distance` field is always null, so compute it from each
+	// store's lat/long against the search point (haversine), then sort
+	// nearest-first and add a rough walk-time estimate.
+	stores, ok := raw.([]any)
+	if !ok {
+		return raw, nil
+	}
+	for _, st := range stores {
+		sm, ok := st.(map[string]any)
+		if !ok {
+			continue
+		}
+		slat, e1 := strconv.ParseFloat(asStr(sm["lat"]), 64)
+		slong, e2 := strconv.ParseFloat(asStr(sm["long"]), 64)
+		if e1 != nil || e2 != nil {
+			continue
+		}
+		km := haversineKm(lat, long, slat, slong)
+		sm["distanceKm"] = math.Round(km*100) / 100
+		sm["distanceMiles"] = math.Round(km*62.1371) / 100
+		sm["walkMinutes"] = int(math.Round(km / 4.8 * 60)) // ~4.8 km/h walking
+	}
+	sort.SliceStable(stores, func(i, j int) bool {
+		return storeDist(stores[i]) < storeDist(stores[j])
+	})
+	return stores, nil
+}
+
+func asStr(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+// storeDist returns a store's computed distanceKm, or +Inf if it couldn't be
+// computed (so those sort last).
+func storeDist(st any) float64 {
+	if sm, ok := st.(map[string]any); ok {
+		if d, ok := sm["distanceKm"].(float64); ok {
+			return d
+		}
+	}
+	return math.Inf(1)
+}
+
+// haversineKm returns the great-circle distance in kilometres.
+func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
+	const R = 6371.0
+	rad := func(d float64) float64 { return d * math.Pi / 180 }
+	dLat := rad(lat2 - lat1)
+	dLon := rad(lon2 - lon1)
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(rad(lat1))*math.Cos(rad(lat2))*math.Sin(dLon/2)*math.Sin(dLon/2)
+	return R * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }
 
 type GetMenuInput struct {
