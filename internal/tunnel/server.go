@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -11,6 +12,7 @@ func (m *Manager) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/pay/", m.handlePay)
 	mux.HandleFunc("/complete/", m.handleComplete)
+	mux.HandleFunc("/return/", m.handleReturn)
 	mux.HandleFunc("/status/", m.handleStatus)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "service": "gails-3ds-challenge"})
@@ -76,6 +78,54 @@ func (m *Manager) handleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": res})
+}
+
+// handleReturn is the returnUrl Adyen redirects the shopper to after a redirect
+// 3DS challenge. It reads the redirectResult (or 3DS1 MD/PaRes) and confirms.
+func (m *Manager) handleReturn(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/return/")
+	rec := m.get(id)
+	if rec == nil {
+		http.Error(w, "unknown payment", http.StatusNotFound)
+		return
+	}
+	_ = r.ParseForm()
+	pick := func(k string) string {
+		if v := r.URL.Query().Get(k); v != "" {
+			return v
+		}
+		return r.FormValue(k)
+	}
+	details := map[string]any{}
+	if rr := pick("redirectResult"); rr != "" {
+		details["redirectResult"] = rr
+	} else if md := pick("MD"); md != "" {
+		details["MD"] = md
+		details["PaRes"] = pick("PaRes")
+	}
+
+	var res any
+	var err error
+	if len(details) > 0 {
+		res, err = m.confirm(context.Background(), rec.Order, rec.Txn, rec.Store, details)
+	} else {
+		err = fmt.Errorf("no redirectResult/PaRes in return URL")
+	}
+	rec.mu.Lock()
+	rec.Done = true
+	if err != nil {
+		rec.Result = map[string]any{"error": err.Error()}
+	} else {
+		rec.Result = res
+	}
+	rec.mu.Unlock()
+
+	w.Header().Set("content-type", "text/html; charset=utf-8")
+	if err != nil {
+		fmt.Fprintf(w, "<html><body style='font-family:system-ui;max-width:480px;margin:40px auto'>⚠️ Payment not confirmed: %s</body></html>", err.Error())
+		return
+	}
+	fmt.Fprint(w, "<html><body style='font-family:system-ui;max-width:480px;margin:40px auto'>✅ Payment confirmed. You can close this tab.</body></html>")
 }
 
 func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {

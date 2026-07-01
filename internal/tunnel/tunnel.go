@@ -71,6 +71,38 @@ func (m *Manager) Prepare(ctx context.Context, rec RecordInput) (map[string]any,
 	}, nil
 }
 
+// Reserve creates a pending record and returns its id plus the returnUrl Adyen
+// should send the shopper back to after a redirect 3DS challenge. Call Fill
+// once the payment is initiated to attach the action + transaction UUID.
+func (m *Manager) Reserve(ctx context.Context, order, store string) (id, returnURL string, err error) {
+	base, err := m.ensure(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	m.recsMu.Lock()
+	m.seq++
+	id = "r" + strconv.Itoa(m.seq) + "-" + strconv.FormatInt(time.Now().UnixNano()%1_000_000, 36)
+	m.recs[id] = &record{Order: order, Store: store}
+	m.recsMu.Unlock()
+	return id, base + "/return/" + id, nil
+}
+
+// Fill attaches the action, transaction UUID and amount to a reserved record.
+func (m *Manager) Fill(id string, action map[string]any, txn string, amount float64) {
+	m.recsMu.Lock()
+	if r := m.recs[id]; r != nil {
+		r.Action = action
+		r.Txn = txn
+		r.Amount = amount
+	}
+	m.recsMu.Unlock()
+}
+
+// PayURL returns the challenge-page URL for a reserved id.
+func (m *Manager) PayURL(id string) string {
+	return m.publicURL + "/pay/" + id
+}
+
 // RecordInput is the data needed to prepare a challenge.
 type RecordInput struct {
 	Action          map[string]any
