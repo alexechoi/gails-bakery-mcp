@@ -371,7 +371,7 @@ func main() {
 
 	server.AddTool(mcp.Tool{
 		Name:        "pay_with_stored_card",
-		Description: "Pay for an order with a saved card, frictionless-first. CSE-encrypts the CVC, initiates payment, then auto-completes the 3-D Secure device fingerprint server-side. Returns a `status`: 'paid' (frictionless — done), '3ds_challenge_required' (a `challenge.pay_url` the shopper opens to approve with their bank), 'authorised_or_no_action', or 'advanced'. WARNING: this attempts a real charge and, when frictionless, places a paid order. Set manual_only=true to just initiate and return the raw action. CVC via `cvc` or the GAILS_CVC env var (preferred). Requires authentication.",
+		Description: "Pay for an order with a saved card. CSE-encrypts the CVC and initiates payment. Returns a `status`: 'authorised_or_no_action' (no 3DS needed — done), or '3ds_required' with a `pay_url` the shopper opens to complete their bank's 3-D Secure — the pay_url runs the full native 3DS (device method + challenge) and confirms the order automatically on approval (no button). Poll `status_url` or get_transactions. WARNING: attempts a real charge / places a real order. Set manual_only=true to just initiate and return the raw 3DS action. CVC via `cvc` or the GAILS_CVC env var (preferred). Requires authentication.",
 		InputSchema: objSchema(map[string]any{
 			"order_uuid":               strSchema("The order UUID to pay for (from create_order)."),
 			"amount":                   numberSchema("Order amount to charge."),
@@ -385,7 +385,7 @@ func main() {
 			"browser_info":             map[string]any{"type": "object", "description": "Optional Adyen browserInfo object; a sensible default is used if omitted."},
 			"manual_only":              boolSchema("If true, only initiate and return the raw 3DS action without auto-completing the fingerprint. Default false (frictionless-first)."),
 			"redirect_3ds":             boolSchema("Sets our own returnUrl for a redirect-style 3DS. NOTE: this tenant's Adyen does not offer a client-selectable redirect flow (browserInfo is mandatory → native 3DS2). Prefer hybrid_3ds."),
-			"hybrid_3ds":               boolSchema("Recommended for a challenged card. Returns a pay_url that runs the bank's full native 3-D Secure in the browser (device method + challenge, form-POST to the ACS, no CORS/iframe wall) and confirms the order automatically when the shopper approves."),
+			"hybrid_3ds":               boolSchema("Deprecated/redundant: the hybrid native-3DS flow is now the default for any 3DS-required payment. Leave unset."),
 		}, "order_uuid", "amount", "stored_payment_method_id"),
 		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var in app.PayWithStoredCardInput
