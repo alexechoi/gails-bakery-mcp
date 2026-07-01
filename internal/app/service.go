@@ -1282,27 +1282,6 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 
 	action, _ := deepFind(initResp, "action").(map[string]any)
 
-	// Hybrid native-3DS2 mode: drive the full 3DS (method + challenge) in the
-	// browser via form-POSTs to the ACS (no CORS / no X-Frame-Options), then
-	// finalise server-side. Returns a pay_url that auto-confirms on approval.
-	if in.Hybrid3DS {
-		if action == nil {
-			out["status"] = "authorised_or_no_action"
-			return out, nil
-		}
-		prep, herr := s.tunnelMgr().PrepareHybrid(ctx, tunnel.HybridInput{
-			OrderUUID: in.OrderUUID, TransactionUUID: txn, Store: store, Amount: in.Amount, Action: action,
-		})
-		if herr != nil {
-			return nil, herr
-		}
-		out["status"] = "3ds_hybrid_required"
-		out["pay_url"] = prep["pay_url"]
-		out["status_url"] = prep["status_url"]
-		out["instructions"] = "Open pay_url: it runs the bank's 3-D Secure end-to-end (device method + challenge) and confirms the order automatically once you approve — no button needed. Poll status_url or get_transactions."
-		return out, nil
-	}
-
 	// Redirect-3DS mode: hand the action to the browser page. Adyen Web
 	// auto-redirects top-level for a redirect action; the bank sends the shopper
 	// back to our /return endpoint, which confirms. (If Adyen returned a native
@@ -1333,54 +1312,21 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 		return out, nil
 	}
 
-	// Frictionless-first: complete the device fingerprint server-side.
-	pd := deepFindString(action, "paymentData")
-	if pd == "" {
-		pd = deepFindString(initResp, "paymentData")
+	// Default (and hybrid_3ds): run the bank's native 3DS end-to-end via the
+	// hybrid flow — the browser does the 3DS method + challenge as ACS
+	// form-POSTs (no CORS, no X-Frame-Options) and it's finalised server-side.
+	// This is the proven path; the old adyen-web-iframe fallback
+	// (prepare_3ds_challenge) hit the client-key CORS allowlist and framing wall.
+	prep, herr := s.tunnelMgr().PrepareHybrid(ctx, tunnel.HybridInput{
+		OrderUUID: in.OrderUUID, TransactionUUID: txn, Store: store, Amount: in.Amount, Action: action,
+	})
+	if herr != nil {
+		return nil, herr
 	}
-	fpResp, ferr := s.submitFingerprint(ctx, pd, "N")
-	if ferr != nil {
-		out["status"] = "action_required"
-		out["fingerprintError"] = ferr.Error()
-		out["action"] = action
-		return out, nil
-	}
-	out["fingerprint"] = fpResp
-
-	// Escalated to an interactive challenge? Hand the ORIGINAL action to the
-	// browser so Adyen Web runs the full 3DS in-browser (fingerprint +
-	// challenge) with real device data — the bank's challenge page only frames
-	// correctly when the browser did the fingerprint. Passing the server-side
-	// challenge action instead makes the ACS serve an error page (which is
-	// X-Frame-Options: SAMEORIGIN → "refused to connect").
-	if ch, _ := deepFind(fpResp, "action").(map[string]any); ch != nil && deepFindString(ch, "subtype") == "challenge" {
-		out["status"] = "3ds_challenge_required"
-		if prep, perr := s.Prepare3DS(ctx, Prepare3DSInput{Action: action, OrderUUID: in.OrderUUID, TransactionUUID: txn, Amount: in.Amount, Store: store}); perr != nil {
-			out["challengeError"] = perr.Error()
-			out["challengeAction"] = action
-		} else {
-			out["challenge"] = prep
-		}
-		return out, nil
-	}
-
-	// Frictionless: confirm with the threeDSResult if present.
-	if tds := deepFindString(fpResp, "threeDSResult"); tds != "" && txn != "" {
-		confRes, cerr := s.confirmOrder(ctx, in.OrderUUID, txn, store, map[string]any{"threeDSResult": tds})
-		if cerr != nil {
-			out["status"] = "fingerprint_done_confirm_failed"
-			out["confirmError"] = cerr.Error()
-			return out, nil
-		}
-		out["confirm"] = confRes
-		out["status"] = "paid"
-		return out, nil
-	}
-
-	if rc := deepFindString(fpResp, "resultCode"); rc != "" {
-		out["fingerprintResultCode"] = rc
-	}
-	out["status"] = "advanced"
+	out["status"] = "3ds_required"
+	out["pay_url"] = prep["pay_url"]
+	out["status_url"] = prep["status_url"]
+	out["instructions"] = "Open pay_url: it runs the bank's 3-D Secure end-to-end (device method + challenge) and confirms the order automatically once you approve — no button. Poll status_url or get_transactions."
 	return out, nil
 }
 
