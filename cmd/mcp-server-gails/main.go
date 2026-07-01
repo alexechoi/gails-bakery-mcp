@@ -371,7 +371,7 @@ func main() {
 
 	server.AddTool(mcp.Tool{
 		Name:        "pay_with_stored_card",
-		Description: "Initiate payment for an order with a saved card: CSE-encrypts the CVC, assembles the providers[] payload, and calls initiate_payment. WARNING: attempts a real charge (and once any 3DS completes, places a paid order). Requires authentication. CVC may be passed as `cvc` or via the GAILS_CVC env var (preferred). Returns the Adyen action (e.g. a 3DS step) or result.",
+		Description: "Pay for an order with a saved card, frictionless-first. CSE-encrypts the CVC, initiates payment, then auto-completes the 3-D Secure device fingerprint server-side. Returns a `status`: 'paid' (frictionless — done), '3ds_challenge_required' (a `challenge.pay_url` the shopper opens to approve with their bank), 'authorised_or_no_action', or 'advanced'. WARNING: this attempts a real charge and, when frictionless, places a paid order. Set manual_only=true to just initiate and return the raw action. CVC via `cvc` or the GAILS_CVC env var (preferred). Requires authentication.",
 		InputSchema: objSchema(map[string]any{
 			"order_uuid":               strSchema("The order UUID to pay for (from create_order)."),
 			"amount":                   numberSchema("Order amount to charge."),
@@ -383,6 +383,7 @@ func main() {
 			"risk_client_data":         strSchema("Optional Adyen device-fingerprint clientData (base64)."),
 			"redirect_url":             strSchema("Optional redirect URL; defaults to the order-confirmation URL."),
 			"browser_info":             map[string]any{"type": "object", "description": "Optional Adyen browserInfo object; a sensible default is used if omitted."},
+			"manual_only":              boolSchema("If true, only initiate and return the raw 3DS action without auto-completing the fingerprint. Default false (frictionless-first)."),
 		}, "order_uuid", "amount", "stored_payment_method_id"),
 		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var in app.PayWithStoredCardInput

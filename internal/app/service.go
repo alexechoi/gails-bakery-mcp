@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	crand "crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -46,16 +47,22 @@ func (s *Service) tunnelMgr() *tunnel.Manager {
 			clientKey = adyen.DefaultClientKey
 		}
 		s.tun = tunnel.New(clientKey, func(ctx context.Context, order, txn, store string, details map[string]any) (any, error) {
-			if store == "" {
-				store = gails.DefaultStoreUUID
-			}
-			q := url.Values{}
-			q.Set("transactionUUID", txn)
-			path := "/payment/v2/transactions/order/" + url.PathEscape(order) + "/confirm"
-			return s.client.JSONAuth(ctx, http.MethodPost, path, q, map[string]any{"details": details}, map[string]string{"store": store})
+			return s.confirmOrder(ctx, order, txn, store, details)
 		})
 	}
 	return s.tun
+}
+
+// confirmOrder finalises a payment: POST /payment/v2/transactions/order/{order}
+// /confirm?transactionUUID={txn} with the given details.
+func (s *Service) confirmOrder(ctx context.Context, order, txn, store string, details map[string]any) (any, error) {
+	if store == "" {
+		store = gails.DefaultStoreUUID
+	}
+	q := url.Values{}
+	q.Set("transactionUUID", txn)
+	path := "/payment/v2/transactions/order/" + url.PathEscape(order) + "/confirm"
+	return s.client.JSONAuth(ctx, http.MethodPost, path, q, map[string]any{"details": details}, map[string]string{"store": store})
 }
 
 // encryptor lazily fetches the Adyen public key (once) and caches an Encryptor.
@@ -1058,6 +1065,7 @@ type PayWithStoredCardInput struct {
 	RiskClientData        string         `json:"risk_client_data"`
 	RedirectURL           string         `json:"redirect_url"`
 	BrowserInfo           map[string]any `json:"browser_info"`
+	ManualOnly            bool           `json:"manual_only"`
 }
 
 // PayWithStoredCard initiates payment for an order using a saved card. It
@@ -1149,8 +1157,145 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 		}},
 		"order": map[string]any{"uuid": in.OrderUUID, "amount": in.Amount},
 	}
-	return s.client.JSONAuth(ctx, http.MethodPost, "/payment/v2/transactions/order", nil, body,
+	initResp, err := s.client.JSONAuth(ctx, http.MethodPost, "/payment/v2/transactions/order", nil, body,
 		map[string]string{"store": store})
+	if err != nil {
+		return nil, err
+	}
+
+	out := map[string]any{"initiate": initResp}
+	resultCode := deepFindString(initResp, "resultCode")
+	txn := deepFindString(initResp, "transactionUUID", "transactionUuid")
+	if txn == "" {
+		txn = deepFindString(deepFind(initResp, "transaction", "transactions"), "uuid")
+	}
+	out["resultCode"] = resultCode
+	out["transactionUUID"] = txn
+
+	action, _ := deepFind(initResp, "action").(map[string]any)
+	if action == nil {
+		// No 3DS action — either authorised outright or nothing to advance.
+		out["status"] = "authorised_or_no_action"
+		return out, nil
+	}
+	if in.ManualOnly {
+		out["status"] = "action_required"
+		out["action"] = action
+		return out, nil
+	}
+
+	// Frictionless-first: complete the device fingerprint server-side.
+	pd := deepFindString(action, "paymentData")
+	if pd == "" {
+		pd = deepFindString(initResp, "paymentData")
+	}
+	fpResp, ferr := s.submitFingerprint(ctx, pd, "N")
+	if ferr != nil {
+		out["status"] = "action_required"
+		out["fingerprintError"] = ferr.Error()
+		out["action"] = action
+		return out, nil
+	}
+	out["fingerprint"] = fpResp
+
+	// Escalated to an interactive challenge? Hand it to the clickable flow.
+	if ch, _ := deepFind(fpResp, "action").(map[string]any); ch != nil && deepFindString(ch, "subtype") == "challenge" {
+		out["status"] = "3ds_challenge_required"
+		if prep, perr := s.Prepare3DS(ctx, Prepare3DSInput{Action: ch, OrderUUID: in.OrderUUID, TransactionUUID: txn, Amount: in.Amount, Store: store}); perr != nil {
+			out["challengeError"] = perr.Error()
+			out["challengeAction"] = ch
+		} else {
+			out["challenge"] = prep
+		}
+		return out, nil
+	}
+
+	// Frictionless: confirm with the threeDSResult if present.
+	if tds := deepFindString(fpResp, "threeDSResult"); tds != "" && txn != "" {
+		confRes, cerr := s.confirmOrder(ctx, in.OrderUUID, txn, store, map[string]any{"threeDSResult": tds})
+		if cerr != nil {
+			out["status"] = "fingerprint_done_confirm_failed"
+			out["confirmError"] = cerr.Error()
+			return out, nil
+		}
+		out["confirm"] = confRes
+		out["status"] = "paid"
+		return out, nil
+	}
+
+	if rc := deepFindString(fpResp, "resultCode"); rc != "" {
+		out["fingerprintResultCode"] = rc
+	}
+	out["status"] = "advanced"
+	return out, nil
+}
+
+// --- 3-D Secure helpers (frictionless-first) ------------------------------
+
+// deepFind returns the first value found under any of the given keys, searching
+// maps and slices recursively. Used to read fields out of Adyen/VMOS responses
+// whose exact nesting we don't want to hard-code.
+func deepFind(node any, keys ...string) any {
+	switch v := node.(type) {
+	case map[string]any:
+		for _, k := range keys {
+			if val, ok := v[k]; ok && val != nil {
+				return val
+			}
+		}
+		for _, val := range v {
+			if got := deepFind(val, keys...); got != nil {
+				return got
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if got := deepFind(item, keys...); got != nil {
+				return got
+			}
+		}
+	}
+	return nil
+}
+
+func deepFindString(node any, keys ...string) string {
+	if s, ok := deepFind(node, keys...).(string); ok {
+		return s
+	}
+	return ""
+}
+
+// submitFingerprint completes the 3DS2 device-fingerprint step server-side by
+// reporting threeDSCompInd (default "N" — no browser ran the method). Adyen
+// then either authorises (frictionless) or returns a challenge action.
+func (s *Service) submitFingerprint(ctx context.Context, paymentData, compInd string) (any, error) {
+	if compInd == "" {
+		compInd = "N"
+	}
+	clientKey := os.Getenv("GAILS_ADYEN_CLIENT_KEY")
+	if clientKey == "" {
+		clientKey = adyen.DefaultClientKey
+	}
+	fp := base64.StdEncoding.EncodeToString([]byte(`{"threeDSCompInd":"` + compInd + `"}`))
+	body, _ := json.Marshal(map[string]any{"fingerprintResult": fp, "paymentData": paymentData})
+	u := "https://checkoutshopper-live.adyen.com/checkoutshopper/v1/submitThreeDS2Fingerprint?token=" + url.QueryEscape(clientKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("origin", "https://gails.vmos.io")
+	req.Header.Set("referer", "https://gails.vmos.io/")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("submitThreeDS2Fingerprint failed: %w", err)
+	}
+	defer resp.Body.Close()
+	var out any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("submitThreeDS2Fingerprint: bad response (HTTP %d)", resp.StatusCode)
+	}
+	return out, nil
 }
 
 // geocodePostcode resolves a UK postcode to lat/long via the free postcodes.io
