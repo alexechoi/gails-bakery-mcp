@@ -18,6 +18,7 @@ import (
 
 	"github.com/alexechoi/gails-bakery-mcp/internal/adyen"
 	"github.com/alexechoi/gails-bakery-mcp/internal/gails"
+	"github.com/alexechoi/gails-bakery-mcp/internal/tunnel"
 )
 
 type Service struct {
@@ -25,10 +26,36 @@ type Service struct {
 
 	encMu sync.Mutex
 	enc   *adyen.Encryptor
+
+	tunMu sync.Mutex
+	tun   *tunnel.Manager
 }
 
 func NewService(client *gails.Client) *Service {
 	return &Service{client: client}
+}
+
+// tunnelMgr lazily builds the embedded 3DS challenge server/tunnel manager,
+// wiring its confirm callback to the authenticated client.
+func (s *Service) tunnelMgr() *tunnel.Manager {
+	s.tunMu.Lock()
+	defer s.tunMu.Unlock()
+	if s.tun == nil {
+		clientKey := os.Getenv("GAILS_ADYEN_CLIENT_KEY")
+		if clientKey == "" {
+			clientKey = adyen.DefaultClientKey
+		}
+		s.tun = tunnel.New(clientKey, func(ctx context.Context, order, txn, store string, details map[string]any) (any, error) {
+			if store == "" {
+				store = gails.DefaultStoreUUID
+			}
+			q := url.Values{}
+			q.Set("transactionUUID", txn)
+			path := "/payment/v2/transactions/order/" + url.PathEscape(order) + "/confirm"
+			return s.client.JSONAuth(ctx, http.MethodPost, path, q, map[string]any{"details": details}, map[string]string{"store": store})
+		})
+	}
+	return s.tun
 }
 
 // encryptor lazily fetches the Adyen public key (once) and caches an Encryptor.
@@ -842,6 +869,135 @@ func (s *Service) InitiatePayment(ctx context.Context, in InitiatePaymentInput) 
 		return nil, fmt.Errorf("body (payment payload incl. providers[] and order) is required")
 	}
 	return s.client.JSONAuth(ctx, http.MethodPost, "/payment/v2/transactions/order", nil, in.Body, nil)
+}
+
+type Decode3DSActionInput struct {
+	Token string `json:"token"`
+}
+
+// Decode3DSAction decodes a 3DS2 action token to reveal its contents
+// (threeDSMethodURL / acsURL / CReq etc.), useful for building a challenge URL.
+// No authentication required.
+func (s *Service) Decode3DSAction(ctx context.Context, in Decode3DSActionInput) (any, error) {
+	if in.Token == "" {
+		return nil, fmt.Errorf("token is required (the action.token from initiate_payment)")
+	}
+	return adyen.DecodeToken(in.Token)
+}
+
+type Submit3DSFingerprintInput struct {
+	PaymentData    string `json:"payment_data"`
+	ThreeDSCompInd string `json:"three_ds_comp_ind"`
+	ClientKey      string `json:"client_key"`
+}
+
+// SubmitFingerprint runs the 3DS2 fingerprint step server-side. For a saved
+// low-value card this often resolves frictionlessly (Authorised); otherwise it
+// returns a challenge action. Requires no auth (talks directly to Adyen).
+func (s *Service) SubmitFingerprint(ctx context.Context, in Submit3DSFingerprintInput) (any, error) {
+	raw, err := adyen.SubmitFingerprint(ctx, http.DefaultClient, in.ClientKey, in.PaymentData, in.ThreeDSCompInd)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRaw(raw), nil
+}
+
+type Submit3DSChallengeInput struct {
+	PaymentData string `json:"payment_data"`
+	TransStatus string `json:"trans_status"`
+	ClientKey   string `json:"client_key"`
+}
+
+// SubmitChallenge submits the 3DS2 challenge result after the shopper has
+// authenticated with their bank.
+func (s *Service) SubmitChallenge(ctx context.Context, in Submit3DSChallengeInput) (any, error) {
+	raw, err := adyen.SubmitChallenge(ctx, http.DefaultClient, in.ClientKey, in.PaymentData, in.TransStatus)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRaw(raw), nil
+}
+
+func decodeRaw(raw json.RawMessage) any {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return string(raw)
+	}
+	return v
+}
+
+type Prepare3DSInput struct {
+	Action          map[string]any `json:"action"`
+	OrderUUID       string         `json:"order_uuid"`
+	TransactionUUID string         `json:"transaction_uuid"`
+	Amount          float64        `json:"amount"`
+	Store           string         `json:"store"`
+}
+
+// Prepare3DS hands a 3-D Secure action (returned by pay_with_stored_card when
+// the bank requires verification) to the companion challenge server, which
+// returns a clickable URL. The shopper opens it, completes the bank's check
+// (e.g. approves in their banking app), and the companion server calls
+// /confirm to finalise the order. The companion server URL is configurable via
+// GAILS_3DS_SERVER.
+func (s *Service) Prepare3DS(ctx context.Context, in Prepare3DSInput) (any, error) {
+	if len(in.Action) == 0 {
+		return nil, fmt.Errorf("action is required (the 3DS `action` object from pay_with_stored_card)")
+	}
+	if in.OrderUUID == "" || in.TransactionUUID == "" {
+		return nil, fmt.Errorf("order_uuid and transaction_uuid are required")
+	}
+
+	// Default path: embedded challenge server + auto ngrok tunnel (no external
+	// server needed). Set GAILS_3DS_SERVER to use an external companion server.
+	server := os.Getenv("GAILS_3DS_SERVER")
+	if server == "" {
+		out, err := s.tunnelMgr().Prepare(ctx, tunnel.RecordInput{
+			Action:          in.Action,
+			OrderUUID:       in.OrderUUID,
+			TransactionUUID: in.TransactionUUID,
+			Store:           in.Store,
+			Amount:          in.Amount,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out["instructions"] = "Open pay_url in a browser and complete the bank's verification; the order confirms automatically. Poll status_url (or get_transactions) to check completion."
+		return out, nil
+	}
+
+	body := map[string]any{
+		"action":          in.Action,
+		"orderUUID":       in.OrderUUID,
+		"transactionUUID": in.TransactionUUID,
+		"amount":          in.Amount,
+	}
+	if in.Store != "" {
+		body["store"] = in.Store
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(server, "/")+"/prepare", strings.NewReader(string(b)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("content-type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("challenge server unreachable at %s: %w", server, err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("challenge server returned non-JSON (HTTP %d)", resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("challenge server error (HTTP %d): %v", resp.StatusCode, out)
+	}
+	out["instructions"] = "Open pay_url in a browser and complete the bank's verification; the order confirms automatically. Poll status_url (or get_transactions) to check completion."
+	return out, nil
 }
 
 type ConfirmPaymentInput struct {
