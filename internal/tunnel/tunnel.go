@@ -28,6 +28,15 @@ type record struct {
 	Store  string
 	Amount float64
 
+	// Hybrid native-3DS2 fields (populated across the method → challenge steps).
+	FPPaymentData string
+	MethodURL     string
+	MethodNotif   string
+	ServerTransID string
+	ACS           string
+	CReq          string
+	AuthToken     string
+
 	mu     sync.Mutex
 	Result any
 	Done   bool
