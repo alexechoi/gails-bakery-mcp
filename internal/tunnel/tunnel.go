@@ -138,7 +138,8 @@ func (m *Manager) serve(port int) error {
 // discoverTunnel returns the public URL and forward port of a running ngrok
 // agent's first https tunnel, via its local API.
 func discoverTunnel() (string, int, error) {
-	resp, err := http.Get("http://127.0.0.1:4040/api/tunnels")
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:4040/api/tunnels")
 	if err != nil {
 		return "", 0, err
 	}
