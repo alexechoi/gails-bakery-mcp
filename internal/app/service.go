@@ -1037,7 +1037,7 @@ func (s *Service) Prepare3DS(ctx context.Context, in Prepare3DSInput) (any, erro
 		if err != nil {
 			return nil, err
 		}
-		out["instructions"] = "Open pay_url in a browser and complete the bank's verification; the order confirms automatically. Poll status_url (or get_transactions) to check completion."
+		out["instructions"] = "Present pay_url_markdown verbatim as a clickable link. Do NOT alter the domain — it must keep the full 'ngrok-free.dev' host (dropping 'ngrok-free' breaks it). Opening it completes the bank's verification and confirms the order automatically. Poll status_url or get_transactions."
 		return out, nil
 	}
 
@@ -1071,7 +1071,7 @@ func (s *Service) Prepare3DS(ctx context.Context, in Prepare3DSInput) (any, erro
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("challenge server error (HTTP %d): %v", resp.StatusCode, out)
 	}
-	out["instructions"] = "Open pay_url in a browser and complete the bank's verification; the order confirms automatically. Poll status_url (or get_transactions) to check completion."
+	out["instructions"] = "Present pay_url_markdown verbatim as a clickable link. Do NOT alter the domain — it must keep the full 'ngrok-free.dev' host (dropping 'ngrok-free' breaks it). Opening it completes the bank's verification and confirms the order automatically. Poll status_url or get_transactions."
 	return out, nil
 }
 
@@ -1323,10 +1323,12 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 	if herr != nil {
 		return nil, herr
 	}
+	payURL, _ := prep["pay_url"].(string)
 	out["status"] = "3ds_required"
-	out["pay_url"] = prep["pay_url"]
+	out["pay_url"] = payURL
+	out["pay_url_markdown"] = "[Approve your bank's 3-D Secure](" + payURL + ")"
 	out["status_url"] = prep["status_url"]
-	out["instructions"] = "Open pay_url: it runs the bank's 3-D Secure end-to-end (device method + challenge) and confirms the order automatically once you approve — no button. Poll status_url or get_transactions."
+	out["instructions"] = "Give the user pay_url EXACTLY as-is — present pay_url_markdown verbatim as a clickable link. Do NOT shorten, retype, or alter the domain: it MUST keep the full 'ngrok-free.dev' host (dropping 'ngrok-free' breaks it → DNS error). Opening it runs 3-D Secure end-to-end and auto-confirms the order once approved. Poll status_url or get_transactions."
 	return out, nil
 }
 

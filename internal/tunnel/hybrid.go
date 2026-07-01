@@ -47,7 +47,12 @@ func (m *Manager) PrepareHybrid(ctx context.Context, in HybridInput) (map[string
 		ServerTransID: str(tk["threeDSServerTransID"]),
 	}
 	m.recsMu.Unlock()
-	return map[string]any{"id": id, "pay_url": base + "/hpay/" + id, "status_url": base + "/status/" + id}, nil
+	return map[string]any{
+		"id":               id,
+		"pay_url":          base + "/hpay/" + id,
+		"pay_url_markdown": "[Approve your bank's 3-D Secure](" + base + "/hpay/" + id + ")",
+		"status_url":       base + "/status/" + id,
+	}, nil
 }
 
 // handleHybridMethod: after the browser runs the 3DS method, submit the
