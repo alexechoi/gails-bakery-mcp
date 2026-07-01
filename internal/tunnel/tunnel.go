@@ -74,9 +74,10 @@ func (m *Manager) Prepare(ctx context.Context, rec RecordInput) (map[string]any,
 	m.recs[id] = &record{Action: rec.Action, Order: rec.OrderUUID, Txn: rec.TransactionUUID, Store: rec.Store, Amount: rec.Amount}
 	m.recsMu.Unlock()
 	return map[string]any{
-		"id":         id,
-		"pay_url":    base + "/pay/" + id,
-		"status_url": base + "/status/" + id,
+		"id":               id,
+		"pay_url":          base + "/pay/" + id,
+		"pay_url_markdown": "[Approve your bank's 3-D Secure](" + base + "/pay/" + id + ")",
+		"status_url":       base + "/status/" + id,
 	}, nil
 }
 
