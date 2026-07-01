@@ -50,6 +50,9 @@ single card field into a JWE blob — see below.
 
 ## Checkout flow
 
+> Full payment & 3-D Secure architecture (including the hybrid flow that
+> completes a challenged card end-to-end): **[docs/PAYMENTS.md](docs/PAYMENTS.md)**.
+
 The full ordering sequence maps to three tools:
 
 1. **`create_order`** → `POST /order/v1/commands/create` — builds the order from the
