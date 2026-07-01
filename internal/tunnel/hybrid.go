@@ -88,29 +88,37 @@ func (m *Manager) handleHybridMethod(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"acs": rec.ACS, "creq": rec.CReq})
 }
 
-// handleHybridFinal: assemble the threeDSResult and confirm the order.
+// handleHybridFinal: assemble the threeDSResult and confirm the order. Safe to
+// call repeatedly (polling): before the shopper approves, /confirm just fails;
+// once it succeeds the result is cached and returned without re-confirming.
 func (m *Manager) handleHybridFinal(w http.ResponseWriter, r *http.Request) {
 	rec := m.get(strings.TrimPrefix(r.URL.Path, "/hfinal/"))
 	if rec == nil {
 		writeJSON(w, 404, map[string]any{"error": "unknown"})
 		return
 	}
+	rec.mu.Lock()
+	if rec.Done {
+		res := rec.Result
+		rec.mu.Unlock()
+		writeJSON(w, 200, map[string]any{"ok": true, "result": res})
+		return
+	}
+	rec.mu.Unlock()
+
 	tds := base64.StdEncoding.EncodeToString(mustJSON(map[string]any{
 		"transStatus": "Y", "authorisationToken": rec.AuthToken,
 	}))
 	res, err := m.confirm(context.Background(), rec.Order, rec.Txn, rec.Store, map[string]any{"threeDSResult": tds})
-	rec.mu.Lock()
-	rec.Done = true
 	if err != nil {
-		rec.Result = map[string]any{"error": err.Error()}
-	} else {
-		rec.Result = res
-	}
-	rec.mu.Unlock()
-	if err != nil {
+		// Not approved yet (or genuine failure) — leave Done=false so polling retries.
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	rec.mu.Lock()
+	rec.Done = true
+	rec.Result = res
+	rec.mu.Unlock()
 	writeJSON(w, 200, map[string]any{"ok": true, "result": res})
 }
 
@@ -198,26 +206,31 @@ const hybridPage = `<!doctype html><html><head><meta charset=utf-8>
 <button id=done style="display:none;font-size:16px;padding:10px 16px;margin-top:14px">I've approved »</button>
 <script>
 const ID="__ID__", MU=__METHOD_URL__, S=document.getElementById('s');
-let finalised=false;
+let done=false, pollId=null;
 function postForm(action,fields,target){const f=document.createElement('form');f.method='POST';f.action=action;f.target=target;for(const k in fields){const i=document.createElement('input');i.type='hidden';i.name=k;i.value=fields[k];f.appendChild(i);}document.body.appendChild(f);f.submit();}
-async function finalise(){ if(finalised) return; finalised=true; S.textContent='Finalising your order…';
-  try{const d=await(await fetch('/hfinal/'+ID,{method:'POST'})).json(); S.textContent=d.ok?'✅ Payment confirmed — order placed!':('⚠️ '+JSON.stringify(d).slice(0,240));}
-  catch(e){ S.textContent='Error finalising: '+e; } }
-// auto-detect: the bank/Adyen posts a message when the challenge completes
-window.addEventListener('message',e=>{ if(String(e.origin).indexOf('adyen.com')>=0 || String(e.origin).indexOf('arcot.com')>=0){ setTimeout(finalise,800); } });
+// tryFinal is safe to call repeatedly: it only marks done on a successful confirm.
+async function tryFinal(){ if(done) return true;
+  try{const j=await(await fetch('/hfinal/'+ID,{method:'POST'})).json();
+    if(j.ok){ done=true; if(pollId) clearInterval(pollId); S.textContent='✅ Payment confirmed — order placed!'; return true; }}
+  catch(e){}
+  return false; }
+// fast path: the bank/Adyen posts a message when the challenge completes
+window.addEventListener('message',e=>{ const o=String(e.origin); if(o.indexOf('adyen.com')>=0||o.indexOf('arcot.com')>=0){ setTimeout(tryFinal,800); } });
 // 1) 3DS method (hidden iframe)
 if(MU) postForm(MU,{threeDSMethodData:"__METHOD_DATA__"},'m');
-// 2) fetch challenge, then render it
+// 2) fetch challenge, then render it and auto-finish
 setTimeout(async()=>{
   S.textContent='Contacting your bank for verification…';
-  const d=await(await fetch('/hmethod/'+ID,{method:'POST'})).json();
-  if(d.frictionless){ finalise(); return; }
+  let d; try{ d=await(await fetch('/hmethod/'+ID,{method:'POST'})).json(); }catch(e){ S.textContent='Error: '+e; return; }
+  if(d.frictionless){ tryFinal(); return; }
   if(d.error){ S.textContent='Error: '+d.error; return; }
-  S.textContent='Approve the request from your bank below (or in your banking app).';
+  S.textContent='Approve the request from your bank (in the box below or your banking app) — this finishes automatically.';
   const ifr=document.createElement('iframe'); ifr.name='c'; ifr.style="width:100%;height:430px;border:1px solid #ccc;border-radius:8px"; document.getElementById('cwrap').appendChild(ifr);
   postForm(d.acs,{creq:d.creq},'c');
-  // fallback button in case the completion message isn't caught
-  setTimeout(()=>{document.getElementById('done').style.display='inline-block';},4000);
+  // auto-poll for completion (fast path is the postMessage above)
+  pollId=setInterval(tryFinal,5000);
+  // reveal a manual button only as a last resort if auto-finish hasn't happened
+  setTimeout(()=>{ if(!done) document.getElementById('done').style.display='inline-block'; },75000);
 },3500);
-document.getElementById('done').onclick=finalise;
+document.getElementById('done').onclick=()=>{ S.textContent='Finalising…'; tryFinal(); };
 </script></body></html>`
