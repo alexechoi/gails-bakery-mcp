@@ -1134,6 +1134,7 @@ type PayWithStoredCardInput struct {
 	RedirectURL           string         `json:"redirect_url"`
 	BrowserInfo           map[string]any `json:"browser_info"`
 	ManualOnly            bool           `json:"manual_only"`
+	Redirect3DS           bool           `json:"redirect_3ds"`
 }
 
 // PayWithStoredCard initiates payment for an order using a saved card. It
@@ -1218,6 +1219,22 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 		paymentMethod["brand"] = in.Brand
 	}
 
+	// Redirect-3DS mode: set our own returnUrl and drop browserInfo so Adyen is
+	// more likely to hand back a redirect action (top-level, no iframe) instead
+	// of a native challenge. The shopper is redirected to the bank and back to
+	// our /return endpoint, which confirms the order.
+	var redirectID string
+	if in.Redirect3DS {
+		id, returnURL, rerr := s.tunnelMgr().Reserve(ctx, in.OrderUUID, store)
+		if rerr != nil {
+			return nil, fmt.Errorf("could not bring up return tunnel: %w", rerr)
+		}
+		redirectID = id
+		meta["returnUrl"] = returnURL
+		meta["redirectUrl"] = returnURL
+		delete(meta, "browserInfo")
+	}
+
 	body := map[string]any{
 		"providers": []any{map[string]any{
 			"amount":        in.Amount,
@@ -1243,6 +1260,26 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 	out["transactionUUID"] = txn
 
 	action, _ := deepFind(initResp, "action").(map[string]any)
+
+	// Redirect-3DS mode: hand the action to the browser page. Adyen Web
+	// auto-redirects top-level for a redirect action; the bank sends the shopper
+	// back to our /return endpoint, which confirms. (If Adyen returned a native
+	// action instead, actionType tells us — the account may not offer redirect.)
+	if in.Redirect3DS && redirectID != "" {
+		if action == nil {
+			out["status"] = "authorised_or_no_action"
+			return out, nil
+		}
+		s.tunnelMgr().Fill(redirectID, action, txn, in.Amount)
+		out["action"] = action
+		out["actionType"] = deepFindString(action, "type") + "/" + deepFindString(action, "subtype")
+		out["pay_url"] = s.tunnelMgr().PayURL(redirectID)
+		out["status"] = "3ds_redirect_required"
+		out["instructions"] = "Open pay_url in a browser: you'll be redirected to your bank, and after approval sent back so the order confirms. Poll status_url or get_transactions."
+		out["status_url"] = strings.Replace(s.tunnelMgr().PayURL(redirectID), "/pay/", "/status/", 1)
+		return out, nil
+	}
+
 	if action == nil {
 		// No 3DS action — either authorised outright or nothing to advance.
 		out["status"] = "authorised_or_no_action"

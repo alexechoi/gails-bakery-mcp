@@ -384,6 +384,7 @@ func main() {
 			"redirect_url":             strSchema("Optional redirect URL; defaults to the order-confirmation URL."),
 			"browser_info":             map[string]any{"type": "object", "description": "Optional Adyen browserInfo object; a sensible default is used if omitted."},
 			"manual_only":              boolSchema("If true, only initiate and return the raw 3DS action without auto-completing the fingerprint. Default false (frictionless-first)."),
+			"redirect_3ds":             boolSchema("If true, request the redirect 3DS flow: sets our own returnUrl and drops browserInfo so the shopper is redirected top-level to the bank and back to our /return endpoint (avoids the iframe framing wall). Returns status '3ds_redirect_required' with a pay_url."),
 		}, "order_uuid", "amount", "stored_payment_method_id"),
 		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var in app.PayWithStoredCardInput
