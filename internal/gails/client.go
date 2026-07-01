@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -119,6 +120,10 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return nil, err
 	}
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		// Signal expired/invalid token so authenticated callers can re-login once.
+		return nil, fmt.Errorf("%s %s returned HTTP 401: %s: %w", method, path, snippet(raw), errUnauthorized)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("%s %s returned HTTP %d: %s", method, path, resp.StatusCode, snippet(raw))
 	}
@@ -161,13 +166,40 @@ func (c *Client) GetJSON(ctx context.Context, path string, query url.Values, hea
 	return decode(unwrap(raw)), nil
 }
 
-// GetJSONAuth performs an authenticated GET and returns the unwrapped payload.
-func (c *Client) GetJSONAuth(ctx context.Context, path string, query url.Values, headers map[string]string) (any, error) {
+// errUnauthorized is returned (wrapped) by do on an HTTP 401 so authenticated
+// callers can transparently re-authenticate.
+var errUnauthorized = errors.New("unauthorized")
+
+// resetToken clears the cached bearer token so the next call logs in afresh.
+func (c *Client) resetToken() {
+	c.mu.Lock()
+	c.token = ""
+	c.mu.Unlock()
+}
+
+// doAuth performs an authenticated request, transparently re-authenticating once
+// if the cached token has expired (HTTP 401). This handles JWT expiry without a
+// server restart.
+func (c *Client) doAuth(ctx context.Context, method, path string, query url.Values, body any, headers map[string]string) (json.RawMessage, error) {
 	h, err := c.authHeaders(ctx, headers)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := c.do(ctx, http.MethodGet, path, query, nil, h)
+	raw, err := c.do(ctx, method, path, query, body, h)
+	if err != nil && errors.Is(err, errUnauthorized) {
+		c.resetToken()
+		h, err = c.authHeaders(ctx, headers)
+		if err != nil {
+			return nil, err
+		}
+		raw, err = c.do(ctx, method, path, query, body, h)
+	}
+	return raw, err
+}
+
+// GetJSONAuth performs an authenticated GET and returns the unwrapped payload.
+func (c *Client) GetJSONAuth(ctx context.Context, path string, query url.Values, headers map[string]string) (any, error) {
+	raw, err := c.doAuth(ctx, http.MethodGet, path, query, nil, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -176,11 +208,7 @@ func (c *Client) GetJSONAuth(ctx context.Context, path string, query url.Values,
 
 // JSONAuth performs an authenticated request with a JSON body (e.g. PATCH/POST).
 func (c *Client) JSONAuth(ctx context.Context, method, path string, query url.Values, body any, headers map[string]string) (any, error) {
-	h, err := c.authHeaders(ctx, headers)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := c.do(ctx, method, path, query, body, h)
+	raw, err := c.doAuth(ctx, method, path, query, body, headers)
 	if err != nil {
 		return nil, err
 	}
