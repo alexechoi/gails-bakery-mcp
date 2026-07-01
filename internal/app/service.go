@@ -1232,7 +1232,9 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 		redirectID = id
 		meta["returnUrl"] = returnURL
 		meta["redirectUrl"] = returnURL
-		delete(meta, "browserInfo")
+		// NB: do NOT drop browserInfo — Adyen requires it for the browser
+		// channel (failureCode 15_002) and this tenant does not offer a
+		// client-selectable redirect flow; it always returns native 3DS2.
 	}
 
 	body := map[string]any{
@@ -1258,6 +1260,15 @@ func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInp
 	}
 	out["resultCode"] = resultCode
 	out["transactionUUID"] = txn
+
+	// Surface an outright payment failure (e.g. validation/refusal) instead of
+	// mislabelling a missing action as "authorised".
+	if fmsg := deepFindString(initResp, "failureMessage"); fmsg != "" {
+		out["status"] = "payment_failed"
+		out["failureCode"] = deepFindString(initResp, "failureCode")
+		out["failureMessage"] = fmsg
+		return out, nil
+	}
 
 	action, _ := deepFind(initResp, "action").(map[string]any)
 
