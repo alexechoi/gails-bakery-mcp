@@ -688,6 +688,8 @@ type PlaceOrderInput struct {
 // the assembled payload WITHOUT creating an order (no charge, nothing placed)
 // so it can be inspected first. Requires auth.
 func (s *Service) PlaceOrder(ctx context.Context, in PlaceOrderInput) (any, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 	if in.BundleID == "" {
 		return nil, fmt.Errorf("bundle_id is required")
 	}
@@ -1012,6 +1014,8 @@ type Prepare3DSInput struct {
 // /confirm to finalise the order. The companion server URL is configurable via
 // GAILS_3DS_SERVER.
 func (s *Service) Prepare3DS(ctx context.Context, in Prepare3DSInput) (any, error) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
 	if len(in.Action) == 0 {
 		return nil, fmt.Errorf("action is required (the 3DS `action` object from pay_with_stored_card)")
 	}
@@ -1140,6 +1144,8 @@ type PayWithStoredCardInput struct {
 // The CVC may be supplied via the cvc argument or the GAILS_CVC environment
 // variable (preferred, so it never appears in tool arguments).
 func (s *Service) PayWithStoredCard(ctx context.Context, in PayWithStoredCardInput) (any, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 	if in.OrderUUID == "" {
 		return nil, fmt.Errorf("order_uuid is required")
 	}
