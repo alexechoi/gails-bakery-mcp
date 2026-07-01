@@ -21,7 +21,7 @@ func main() {
 
 	server.AddTool(mcp.Tool{
 		Name:        "find_stores",
-		Description: "Find Gail's Bakery stores near a postcode or lat/long. No authentication required. Note: the `hours` field is always null here — for whether a store is open use `status` (active) and `appStatus.online == \"on\"` (accepting online orders), and for actual opening times call `store_hours`.",
+		Description: "Find Gail's Bakery stores near a postcode or lat/long, sorted nearest-first. No authentication required. Each store includes a computed `distanceKm`, `distanceMiles` and `walkMinutes` (the API's own `distance` field is always null, so it's calculated from coordinates). The nearest store is the first result. Note: `hours` is always null here — for open-now use `status` + `appStatus.online == \"on\"`, and for opening times call `store_hours`.",
 		InputSchema: objSchema(map[string]any{
 			"postcode": strSchema("UK postcode to search near, e.g. 'EC4V 6BJ'."),
 			"lat":      numberSchema("Latitude to search near (optional, used with long)."),
