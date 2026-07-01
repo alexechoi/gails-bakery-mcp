@@ -42,6 +42,7 @@ go build -o gails-mcp ./cmd/mcp-server-gails
 | `create_order`       | Create an order from a basket (checkout step 1; no charge). |
 | `initiate_payment`   | Start payment for an order (checkout step 2; returns 3DS action). |
 | `pay_with_stored_card`| Encrypt the CVC and start payment with a saved card. ⚠️ attempts a real charge. |
+| `prepare_3ds_challenge`| Turn a 3-D Secure `action` into a clickable verification URL (see below). |
 | `confirm_payment`    | Confirm/finalise payment for an order. ⚠️ places a real, paid order. |
 
 `adyen_encrypt` (public, no auth) performs Adyen client-side encryption of a
@@ -82,6 +83,25 @@ sent. This server performs that **Adyen client-side encryption** itself
 > A brand-new card (not a saved one) still triggers an interactive 3DS
 > challenge that cannot be completed headlessly; the saved-card path is the
 > one designed for automation.
+
+### 3-D Secure challenges (`prepare_3ds_challenge`)
+
+When the bank requires verification, `pay_with_stored_card` returns a 3-D
+Secure `action`. The MCP can't perform the bank check itself (it needs a
+browser + your banking-app approval), so `prepare_3ds_challenge` turns that
+`action` into a **clickable URL**:
+
+1. The MCP runs a small challenge server **embedded in the process** and
+   exposes it via ngrok — reusing a running ngrok agent's tunnel if there is
+   one, otherwise spawning `ngrok http` itself. No external server to run.
+2. The returned `pay_url` loads Adyen Web, renders your bank's challenge, and
+   you approve (e.g. in your banking app).
+3. On completion the embedded server calls `/confirm` for you and the order is
+   placed. Poll `status_url` (or `get_transactions`) to see the result.
+
+Requirements: the `ngrok` CLI installed and authenticated (a free account is
+fine). Set `GAILS_3DS_SERVER` to point at an external companion server instead
+of the embedded one, if you prefer.
 
 > **Note:** the exact upstream path for order history is tenant-specific and
 > was not confirmed during development. `order_history` therefore takes a

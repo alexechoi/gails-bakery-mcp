@@ -18,6 +18,7 @@ import (
 
 	"github.com/alexechoi/gails-bakery-mcp/internal/adyen"
 	"github.com/alexechoi/gails-bakery-mcp/internal/gails"
+	"github.com/alexechoi/gails-bakery-mcp/internal/tunnel"
 )
 
 type Service struct {
@@ -25,10 +26,36 @@ type Service struct {
 
 	encMu sync.Mutex
 	enc   *adyen.Encryptor
+
+	tunMu sync.Mutex
+	tun   *tunnel.Manager
 }
 
 func NewService(client *gails.Client) *Service {
 	return &Service{client: client}
+}
+
+// tunnelMgr lazily builds the embedded 3DS challenge server/tunnel manager,
+// wiring its confirm callback to the authenticated client.
+func (s *Service) tunnelMgr() *tunnel.Manager {
+	s.tunMu.Lock()
+	defer s.tunMu.Unlock()
+	if s.tun == nil {
+		clientKey := os.Getenv("GAILS_ADYEN_CLIENT_KEY")
+		if clientKey == "" {
+			clientKey = adyen.DefaultClientKey
+		}
+		s.tun = tunnel.New(clientKey, func(ctx context.Context, order, txn, store string, details map[string]any) (any, error) {
+			if store == "" {
+				store = gails.DefaultStoreUUID
+			}
+			q := url.Values{}
+			q.Set("transactionUUID", txn)
+			path := "/payment/v2/transactions/order/" + url.PathEscape(order) + "/confirm"
+			return s.client.JSONAuth(ctx, http.MethodPost, path, q, map[string]any{"details": details}, map[string]string{"store": store})
+		})
+	}
+	return s.tun
 }
 
 // encryptor lazily fetches the Adyen public key (once) and caches an Encryptor.
@@ -920,10 +947,25 @@ func (s *Service) Prepare3DS(ctx context.Context, in Prepare3DSInput) (any, erro
 	if in.OrderUUID == "" || in.TransactionUUID == "" {
 		return nil, fmt.Errorf("order_uuid and transaction_uuid are required")
 	}
+
+	// Default path: embedded challenge server + auto ngrok tunnel (no external
+	// server needed). Set GAILS_3DS_SERVER to use an external companion server.
 	server := os.Getenv("GAILS_3DS_SERVER")
 	if server == "" {
-		server = "https://brook-related-armless.ngrok-free.dev"
+		out, err := s.tunnelMgr().Prepare(ctx, tunnel.RecordInput{
+			Action:          in.Action,
+			OrderUUID:       in.OrderUUID,
+			TransactionUUID: in.TransactionUUID,
+			Store:           in.Store,
+			Amount:          in.Amount,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out["instructions"] = "Open pay_url in a browser and complete the bank's verification; the order confirms automatically. Poll status_url (or get_transactions) to check completion."
+		return out, nil
 	}
+
 	body := map[string]any{
 		"action":          in.Action,
 		"orderUUID":       in.OrderUUID,
