@@ -27,6 +27,9 @@ func (m *Manager) get(id string) *record {
 }
 
 func (m *Manager) handlePay(w http.ResponseWriter, r *http.Request) {
+	// Permissive CORS on our own responses (rules out CORS as a variable; note
+	// this does NOT affect arcot/Adyen's own X-Frame-Options/allowlist).
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	id := strings.TrimPrefix(r.URL.Path, "/pay/")
 	rec := m.get(id)
 	if rec == nil {
@@ -141,6 +144,7 @@ func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
