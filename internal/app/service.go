@@ -23,6 +23,11 @@ import (
 	"github.com/alexechoi/gails-bakery-mcp/internal/tunnel"
 )
 
+// extHTTP is used for auxiliary calls (Adyen checkoutshopper, postcodes.io, the
+// external 3DS server). It has a bounded timeout so a slow/half-open upstream
+// can't hang a tool call for minutes.
+var extHTTP = &http.Client{Timeout: 15 * time.Second}
+
 type Service struct {
 	client *gails.Client
 
@@ -74,7 +79,7 @@ func (s *Service) encryptor(ctx context.Context) (*adyen.Encryptor, error) {
 	if s.enc != nil {
 		return s.enc, nil
 	}
-	e, err := adyen.FetchEncryptor(ctx, http.DefaultClient, os.Getenv("GAILS_ADYEN_CLIENT_KEY"))
+	e, err := adyen.FetchEncryptor(ctx, extHTTP, os.Getenv("GAILS_ADYEN_CLIENT_KEY"))
 	if err != nil {
 		return nil, err
 	}
@@ -961,7 +966,7 @@ type Submit3DSFingerprintInput struct {
 // low-value card this often resolves frictionlessly (Authorised); otherwise it
 // returns a challenge action. Requires no auth (talks directly to Adyen).
 func (s *Service) SubmitFingerprint(ctx context.Context, in Submit3DSFingerprintInput) (any, error) {
-	raw, err := adyen.SubmitFingerprint(ctx, http.DefaultClient, in.ClientKey, in.PaymentData, in.ThreeDSCompInd)
+	raw, err := adyen.SubmitFingerprint(ctx, extHTTP, in.ClientKey, in.PaymentData, in.ThreeDSCompInd)
 	if err != nil {
 		return nil, err
 	}
@@ -977,7 +982,7 @@ type Submit3DSChallengeInput struct {
 // SubmitChallenge submits the 3DS2 challenge result after the shopper has
 // authenticated with their bank.
 func (s *Service) SubmitChallenge(ctx context.Context, in Submit3DSChallengeInput) (any, error) {
-	raw, err := adyen.SubmitChallenge(ctx, http.DefaultClient, in.ClientKey, in.PaymentData, in.TransStatus)
+	raw, err := adyen.SubmitChallenge(ctx, extHTTP, in.ClientKey, in.PaymentData, in.TransStatus)
 	if err != nil {
 		return nil, err
 	}
@@ -1050,7 +1055,7 @@ func (s *Service) Prepare3DS(ctx context.Context, in Prepare3DSInput) (any, erro
 		return nil, err
 	}
 	req.Header.Set("content-type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := extHTTP.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("challenge server unreachable at %s: %w", server, err)
 	}
@@ -1350,7 +1355,7 @@ func (s *Service) submitFingerprint(ctx context.Context, paymentData, compInd st
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("origin", "https://gails.vmos.io")
 	req.Header.Set("referer", "https://gails.vmos.io/")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := extHTTP.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("submitThreeDS2Fingerprint failed: %w", err)
 	}
@@ -1371,7 +1376,7 @@ func geocodePostcode(ctx context.Context, postcode string) (lat, long float64, e
 	if err != nil {
 		return 0, 0, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := extHTTP.Do(req)
 	if err != nil {
 		return 0, 0, err
 	}
